@@ -1,7 +1,8 @@
+data_prepared/*/*
+data_raw/*/*
+!data_raw/*
 
 
-
-data*/*
 *env2
 whisper/*
 
