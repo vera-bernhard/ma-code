@@ -1,0 +1,14 @@
+srt
+pydub
+lxml
+bs4
+jiwer
+jupyter
+ipykernel
+torch
+numpy<=2.0
+tqdm
+tiktoken
+numba
+transformers
+datasets
