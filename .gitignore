@@ -1,10 +1,11 @@
-data_prepared/*/*
+data_prepared/*
 data_raw/*/*
 !data_raw/*
 
 
 *env2
 whisper/*
+wandb/*
 
 
 # Created by https://www.toptal.com/developers/gitignore/api/visualstudiocode,python

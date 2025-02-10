@@ -12,3 +12,9 @@ tiktoken
 numba
 transformers
 datasets
+seaborn
+tqdm
+datasets
+librosa
+wandb
+accelerate>=0.26.0
