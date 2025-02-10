@@ -134,7 +134,7 @@ def load_data_from_file(file_path: str):
     for line in lines:
         audio_file, text_file = line.strip().split("\t")
         text = open(text_file, "r", encoding="utf-8").read()
-        data.append({"audio": {"path": audio_file}, "text": text})
+        data.append({"audio": {"path": audio_file}, "text": text, "audio_path": audio_file})
 
     data = Dataset.from_list(data)
     return data
@@ -172,12 +172,13 @@ def preprocess(dataset: DatasetDict, whisper_size: str = 'small', outdir: str = 
         if input_features.shape[-1] != 3000:
             logger.warning(f"Warning: Expected 3000 mel features, got {input_features.shape[-1]}")
         
-        logger.info(f"Processed {batch['audio']['path']} successfully.")
         token_data = tokenizer(batch["text"], padding="max_length", truncation=True, max_length=448, return_tensors="pt")
         return {
             "input_features": input_features[0],  # Take the first element for batch processing
             "labels": token_data.input_ids[0],
             "attention_mask": token_data.attention_mask[0],
+            "audio_path": batch["audio_path"]  # Keep audio path
+
         }
 
     dataset = dataset.map(preprocess_function, remove_columns=[
