@@ -6,7 +6,7 @@ jiwer
 jupyter
 ipykernel
 torch
-numpy<=2.0
+numpy
 tqdm
 tiktoken
 numba

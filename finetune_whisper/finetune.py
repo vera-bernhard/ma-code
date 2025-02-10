@@ -17,12 +17,25 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Union
 from tqdm import tqdm
 import csv
+import logging
+import sys
 
 # Set seed for reproducibility
 random.seed(42)
 
 # based on https://huggingface.co/learn/audio-course/chapter5/fine-tuning
 
+
+# add logger
+logging.basicConfig(
+    level=logging.INFO, 
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler("log/preprocess.out"),
+        logging.StreamHandler(sys.stdout)
+    ],
+    force=True)
+logger = logging.getLogger()
 
 @dataclass
 class DataCollatorSpeechSeq2SeqWithPadding:
@@ -63,6 +76,7 @@ def make_split(data_dir: str, output_dir: str, train_ratio: float = 0.8, dataset
     i.e. it writes three text files with the paths to the audio and transcript files for each split.
 
     """
+    logger.info(f"Making the split in {output_dir}")
     files = [f for f in os.listdir(data_dir) if f.endswith(".wav")]
     files.sort()
     random.shuffle(files)
@@ -96,6 +110,7 @@ def make_split(data_dir: str, output_dir: str, train_ratio: float = 0.8, dataset
 
 def load_custom_dataset(train_file: str, val_file: str, test_file: str):
     """Loads a custom dataset from a given train, validation, and test file."""
+    logger.info(f"Loading splits")
     train_data = load_data_from_file(train_file)
     val_data = load_data_from_file(val_file)
     test_data = load_data_from_file(test_file)
@@ -112,6 +127,7 @@ def load_custom_dataset(train_file: str, val_file: str, test_file: str):
 
 def load_data_from_file(file_path: str):
     """Loads dataset from a given text file with wav-transcript pairs."""
+    logging.info(f"Loading from {file_path}")
     with open(file_path, "r", encoding="utf-8") as f:
         lines = f.readlines()
     data = []
@@ -125,6 +141,7 @@ def load_data_from_file(file_path: str):
 
 
 def preprocess(dataset: DatasetDict, whisper_size: str = 'small', outdir: str = "./data_prepared/srf_ad_feat"):
+    logger.info('Starting data preprocessing...')
     tokenizer = WhisperTokenizer.from_pretrained(
         f"openai/whisper-{whisper_size}")
     feature_extractor = WhisperFeatureExtractor.from_pretrained(
@@ -135,7 +152,7 @@ def preprocess(dataset: DatasetDict, whisper_size: str = 'small', outdir: str = 
     def preprocess_function(batch):
         audio_array = batch["audio"]["array"]
         if audio_array is None or len(audio_array) == 0:
-            print(f"Faulty audio: {batch['audio']['path']}")
+            logger.warning(f"Faulty audio: {batch['audio']['path']}")
             return None
 
         audio_input = feature_extractor(
@@ -153,9 +170,9 @@ def preprocess(dataset: DatasetDict, whisper_size: str = 'small', outdir: str = 
             input_features = input_features[:, :3000]
         
         if input_features.shape[-1] != 3000:
-            print(f"Warning: Expected 3000 mel features, got {input_features.shape[-1]}")
+            logger.warning(f"Warning: Expected 3000 mel features, got {input_features.shape[-1]}")
         
-        # 
+        logger.info(f"Processed {batch['audio']['path']} successfully.")
         token_data = tokenizer(batch["text"], padding="max_length", truncation=True, max_length=448, return_tensors="pt")
         return {
             "input_features": input_features[0],  # Take the first element for batch processing
@@ -165,7 +182,7 @@ def preprocess(dataset: DatasetDict, whisper_size: str = 'small', outdir: str = 
 
     dataset = dataset.map(preprocess_function, remove_columns=[
                           "audio", "text"], num_proc=4)
-
+    logger.info(f'Saving data set to {outdir}')
     dataset.save_to_disk(outdir)
     return dataset
 
@@ -280,23 +297,24 @@ def compute_metrics(pred, model_size: str = 'small'):
 
 
 if __name__ == "__main__":
-    data_path = "/home/vera/Documents/Uni/Master/Master_Thesis/ma-code/data_prepared/srf_ad"
-    output_path = "/home/vera/Documents/Uni/Master/Master_Thesis/ma-code/data_prepared"
-    output_feat_path = "/home/vera/Documents/Uni/Master/Master_Thesis/ma-code/data_prepared/srf_ad_feat"
-    subset = 0.05
+    data_path = "/home/vebern/scratch/srf_ad"
+    output_path = "/home/vebern/data/ma-code/finetune_whisper/finetune_whisper_small"
+    output_feat_path = "/home/vebern/scratch/srf_ad_feat"
+
+
     train_file, val_file, test_file = make_split(
-        data_path, output_path, subset=subset)
+        data_path, output_path)
     model_size = 'small'
-    size = ['small', 'medium', 'large']
+    sizes = ['small', 'medium', 'large']
 
     dataset = load_custom_dataset(train_file, val_file, test_file)
     dataset = preprocess(dataset, model_size, output_feat_path)
 
     # load preprocessed dataset
-    dataset = DatasetDict.load_from_disk(output_feat_path)
+    # dataset = DatasetDict.load_from_disk(output_feat_path)
 
     # let not fine-tuned model predict on test set
     # predict(None, dataset["test"], f"predictions_whisper_{model_size}_untrained.csv",
     #         model_path=None, whisper_size=model_size)
 
-    fine_tune(output_feat_path, model_size, save_path=f"./fine_tuned_whisper_{model_size}_{subset}")
+    # fine_tune(output_feat_path, model_size, save_path=f"./fine_tuned_whisper_{model_size}_{subset}")
