@@ -1,18 +1,16 @@
 import os
+import wave
+import io
 from datetime import timedelta
 import re
-from typing import Optional, Generator
+from typing import Optional
+from dataclasses import dataclass
 
 import srt
-import lxml
-import wave
 import chardet
 import pandas as pd
 import seaborn as sns
 from tqdm import tqdm
-import io
-
-from bs4 import BeautifulSoup
 from pydub import AudioSegment
 
 ARCHIMOB_XML_DIR = 'Archimob/Archimob_Release_2'
@@ -23,8 +21,6 @@ NAMESPACES = {
 }
 
 # ARCHIMOB FUNCTIONS
-
-
 def get_archimob_data(recording: str, start: str, end: str, output_dir=None) -> tuple[str, str]:
     """Extract audio and text  snippets from the ArchiMob dataset."""
     audio_files = []
@@ -128,7 +124,8 @@ def extract_audio_and_text_all(wav_file: str, srt_file: str, outdir: str, prefix
     """Extract all audio snippets appearing in a SRT file and writes both audio and text to files."""
     # check if wav file ends in .wav
     if not wav_file.endswith('.wav'):
-        raise ValueError('Looks like the audio file is not passed correctly, please provide a .wav file.')
+        raise ValueError(
+            'Looks like the audio file is not passed correctly, please provide a .wav file.')
     audio_files = []
     basename = os.path.basename(wav_file).rstrip('.wav')
     print(f'Processing {basename}...')
@@ -143,101 +140,25 @@ def extract_audio_and_text_all(wav_file: str, srt_file: str, outdir: str, prefix
                 os.remove(os.path.join(outdir, file))
                 print(f'Removed {file}')
 
-    srt_data = read_srt_file(srt_file)
-    timestamps = [(sub['start'], sub['end'], sub['idx']) for sub in srt_data]
-    audio_files = extract_audio_snippets(wav_file, timestamps, outdir)
+    srt_data = SRTReader(srt_file)
 
-    first_idx = None
+    timestamps = []
     text_files = []
     for d in srt_data:
-        if first_idx is None:
-            first_idx = d['idx']
-        output_text_file = os.path.join(outdir, f'{prefix}_{d["idx"]}_{
-                                        basename}.txt') if prefix else os.path.join(outdir, f'{d["idx"]}_{basename}.txt')
+        output_text_file = os.path.join(outdir, f'{prefix}_{d.index}_{
+                                        basename}.txt') if prefix else os.path.join(outdir, f'{d.index}_{basename}.txt')
+        
         with open(output_text_file, 'w', encoding='utf-8') as f:
-            text = clean_subtitle_text(d['text'])
-            f.write(text)
+            f.write(d.content)
         text_files.append(output_text_file)
-    
-    for idx, audio_file in enumerate(audio_files, start=first_idx):
-        new_name = f'{prefix}_{idx}_{basename}.wav'
-        os.rename(audio_file, os.path.join(outdir, new_name))
+        timestamps.append((d.start, d.end, d.index))
 
-
-
+    # Extract audio snippet    
+    audio_files = extract_audio_snippets(wav_file, timestamps, outdir, prefix=prefix)
     return list(zip(audio_files, text_files))
 
 
-def already_extracted(srt_file: str, basename: str, outdir: str) -> bool:
-    """Check if audio and text files have already been extracted for a given basename."""
-    audio_files = []
-    text_files = []
-    # create outdir if it does not exist
-    if not os.path.exists(outdir):
-        os.makedirs(outdir)
-    for file in os.listdir(outdir):
-        if basename in file:
-            if file.endswith('.wav'):
-                audio_files.append(file)
-            elif file.endswith('.txt'):
-                text_files.append(file)
-    processed = len(audio_files) > 0 and len(text_files) > 0
-    processed = processed and len(audio_files) == len(text_files)
-    nr = get_end_idx(srt_file)
-    processed = processed and len(audio_files) == nr
-    return processed
-
-
-def read_srt_file(srt_file: str, start_idx: int = 0, end_idx: int = -1) -> list[dict[str, str]]:
-    """Read an SRT file and return a list of dictionaries with subtitle data."""
-    encoding = detect_encoding(srt_file)
-    with open(srt_file, 'r', encoding=encoding) as f:
-        srt_content = f.read()
-
-        if detect_swiss_srt_format(srt_content):
-            srt_generator = parse_swiss_srt(srt_content)
-        else:
-            srt_generator = srt.parse(srt_content)
-
-        srt_data = []
-        offset = timedelta(seconds=0)
-
-        # TODO: Find a better solution
-        if end_idx == -1:
-            end_idx = 999999
-        prev_idx = 0
-        index_anomaly = False
-        for sub in srt_generator:
-            # Check if the first subtitle starts at 10 hours --> weird time offset in srf data
-            if sub.index == 0 or sub.index == 1:
-                if sub.start.seconds >= 36000:
-                    offset = timedelta(seconds=36000)
-
-            if prev_idx > sub.index and not index_anomaly:
-                index_anomaly = True
-                print(f'Anomaly in SRT file: {
-                      srt_file}, continuing indexing...')
-
-            if sub.index < start_idx:
-                continue
-            elif sub.index <= end_idx:
-                start = srt.timedelta_to_srt_timestamp(sub.start - offset)
-                end = srt.timedelta_to_srt_timestamp(sub.end - offset)
-                text = sub.content.replace('\n', ' ')
-                srt_data.append(
-                    {'start': start,
-                     'end': end,
-                     'text': text,
-                     'idx': sub.index if not index_anomaly else prev_idx + 1})
-
-            if index_anomaly:
-                prev_idx += 1
-            else:
-                prev_idx = sub.index
-    return srt_data
-
-
-def process_srfad_files(wav_dir: str, srt_dir: str, manual_match: dict) -> list[tuple[str, str]]:
+def match_audio_srt_files(wav_dir: str, srt_dir: str, manual_match: dict) -> list[tuple[str, str]]:
     """ Find and match SRFAD audio and SRT files, to be further processed."""
     data = []
     idx = 0
@@ -249,7 +170,8 @@ def process_srfad_files(wav_dir: str, srt_dir: str, manual_match: dict) -> list[
                     srt_dir, manual_match[file])
             else:
                 srt_file = os.path.join(srt_dir, file.replace('.wav', '.srt'))
-                srt_file_2 = os.path.join(srt_dir, file.replace('.wav', '.txt'))
+                srt_file_2 = os.path.join(
+                    srt_dir, file.replace('.wav', '.txt'))
                 srt_file_3 = os.path.join(
                     srt_dir, file.replace('.wav', '.CHDE.srt'))
                 srt_file_matched = None
@@ -268,34 +190,9 @@ def process_srfad_files(wav_dir: str, srt_dir: str, manual_match: dict) -> list[
     return data
 
 
-def get_end_idx(srt_file: str) -> int:
-    """Find the index of the last subtitle in an SRT file, i.e. find the number of subtitles."""
-    # encoding = detect_encoding(srt_file) takes way too long
-    try:
-        with open(srt_file, 'r', encoding='utf-8') as f:
-            srt_content = f.read()
-    except UnicodeDecodeError:
-        with open(srt_file, 'r', encoding='iso-8859-1') as f:
-            srt_content = f.read()
-
-    if detect_swiss_srt_format(srt_content):
-        srt_generator = parse_swiss_srt(srt_content)
-    else:
-        srt_generator = srt.parse(srt_content)
-
-    sub = None
-    for sub in srt_generator:
-        pass
-
-    if sub is not None:
-        return sub.index
-    else:
-        return -1
-
-
 def prepare_srfad_data(wav_dir: str, srt_dir: str, outdir: str, manual_match: dict) -> None:
     """Prepare SRFAD data for further processing by extracting audio and text snippets."""
-    data_files = process_srfad_files(wav_dir, srt_dir, manual_match)
+    data_files = match_audio_srt_files(wav_dir, srt_dir, manual_match)
     idx = 0
     with tqdm(data_files, desc="Processing files") as pbar:
         for wav_file, srt_file in pbar:
@@ -304,131 +201,232 @@ def prepare_srfad_data(wav_dir: str, srt_dir: str, outdir: str, manual_match: di
             extract_audio_and_text_all(
                 wav_file, srt_file, outdir, prefix=id_string)
 
+
+def already_extracted(srt_file: str, basename: str, outdir: str) -> bool:
+    """Check if audio and text files have already been extracted for a given basename."""
+    srt_reader = SRTReader(srt_file)
+    audio_files = []
+    text_files = []
+    # create outdir if it does not exist
+    if not os.path.exists(outdir):
+        os.makedirs(outdir)
+    for file in os.listdir(outdir):
+        if basename in file:
+            if file.endswith('.wav'):
+                audio_files.append(file)
+            elif file.endswith('.txt'):
+                text_files.append(file)
+    processed = len(audio_files) > 0 and len(text_files) > 0
+    processed = processed and len(audio_files) == len(text_files)
+    processed = processed and len(audio_files) == srt_reader.nr_valid_subtitles
+    return processed
+
+@dataclass
 class Subtitle:
-    def __init__(self, index, start, end, content):
-        self.index = index
-        self.start = start
-        self.end = end
-        self.content = content
+    index: int
+    start: timedelta
+    end: timedelta
+    content: str
 
 
-def clean_subtitle_text(text: str) -> str:
-    orig = text
-    """Clean subtitle text by removing unwanted characters."""
+class SRTReader():
 
-    # there is brackets with timestamps (some text 00:00:02 kj)
-    text = re.sub(r'\(.*?\d{2}:\d{2}:\d{2}.*?\)', '', text)
-    # reaplace (über .+?) with ''
-    text = re.sub(r'\(über .+?\)', '', text)
+    def __init__(self, srt_file):
+        self.srt_file = srt_file
+        self.encoding = detect_encoding(srt_file)
+        self.is_swiss_srt = self._detect_swiss_srt_format()
 
-    # 1. Trailing $
-    if text.startswith('$$'):
-        text = text[2:]
-    if text.startswith('$'):
-        text = text[1:]
-    if text.startswith('*'):
-        text = text[1:]
+        self.data = []
+        self.nr_valid_subtitles = 0
+        self.has_offset = False
+        self.first_index = -1
 
-    # there is double brackets
-    text = re.sub(r'\(\(.*?\)\)', '', text)
+        self.parse_file()
 
-    # remove brackets but keep content
-    text = re.sub(r'\(', '', text)
-    text = re.sub(r'\)', '', text)
-    
-    # Remove * and $ when whitespace before and after
-    text = re.sub(r'\s\*\s', ' ', text)
-    text = re.sub(r'\s\$\s', ' ', text)
+    def __iter__(self):
+        for sub in self.data:
+            sub.content = self.clean_subtitle_text(sub.content)
+            yield sub
 
-    # remove several whitespaces in a row
-    text = re.sub(r'\s+', ' ', text)
+    def __repr__(self):
+        return f'SRTReader(srt_file={self.srt_file})'
 
-    # Trailing $
-    if text.startswith('$$'):
-        text = text[2:]
-    if text.startswith('$'):
-        text = text[1:]
-    if text.startswith('*'):
-        text = text[1:]
+    def _detect_swiss_srt_format(self):
+        """
+        Detects whether the SRT file is in Swiss-style format via the timestamp format
+            swiss srt: 00:00:00:00
+            normal srt: 00:00:00,000
+        """
+        with open(self.srt_file, 'r', encoding=self.encoding) as f:
+            lines = f.readlines()
+            second_line = lines[1]
+            # check format of timestamps:
+            if re.search(r'\d{2}:\d{2}:\d{2}:\d{2}', second_line):
+                return True
+            return False
 
-    final = text.strip()
-    if orig != final:
-        print(f'{orig} --> {final}')
-    return final
+    def _parse_swiss_time_to_timedelta(self, time_str: str, offset: bool = False) -> timedelta:
+        """
+        Converts Swiss-style timestamp HH:MM:SS:FF to a timedelta object.
+        """
+        hours, minutes, seconds, frames = map(int, time_str.split(':'))
+        total_seconds = hours * 3600 + minutes * 60 + seconds + \
+            frames / 24  # Assuming 24 fps for the frames
+        if offset:
+            # remove 10 hours offset
+            total_seconds -= 36000
+        return timedelta(seconds=total_seconds)
 
-# typen with open type
-def parse_swiss_srt(srt_content: io.TextIOWrapper 
-                    ) -> Generator[Subtitle, None, None]:
-    """
-    Parses Swiss-style subtitles into a generator of Subtitle objects.
-    Swiss-style format has timestamps like HH:MM:SS:FF and spaces in between.
-    """
-    # Regex pattern to match Swiss-style timestamp lines (start and end times)
-    timestamp_pattern = re.compile(
-        r'(\d{2}:\d{2}:\d{2}:\d{2})\s*(\d{2}:\d{2}:\d{2}:\d{2})')
-    # Regex pattern to match subtitle index
-    index_pattern = re.compile(r'^\d+$')
+    def parse_file_swiss(self, srt_file) -> list[Subtitle]:
+        # Regex pattern to match Swiss-style timestamp lines (start and end times)
+        timestamp_pattern = re.compile(
+            r'(\d{2}:\d{2}:\d{2}:\d{2})\s*(\d{2}:\d{2}:\d{2}:\d{2})')
+        # Regex pattern to match subtitle index
+        index_pattern = re.compile(r'^\d+$')
 
-    lines = srt_content.splitlines()
-    index = None
-    start = None
-    end = None
-    content = ''
+        index = None
+        start = None
+        end = None
+        content = ''
+        subtitles = []
+        with open(srt_file, 'r', encoding=self.encoding) as f:
+            lines = f.readlines()
+            for line in lines:
+                if index_pattern.match(line):
+                    index = int(index_pattern.match(line).group())
 
-    offset = False
-    for line in lines:
-        if index_pattern.match(line):
-            index = int(index_pattern.match(line).group())
-        elif timestamp_pattern.match(line):
-            timestamp_match = timestamp_pattern.match(line)                
-            start_time_str = timestamp_match.group(1)
-            end_time_str = timestamp_match.group(2)
-            if index == 0 or index == 1:
-                if start_time_str.startswith('10:'):
-                    offset = True
-            start = parse_swiss_time_to_timedelta(start_time_str, offset)
-            end = parse_swiss_time_to_timedelta(end_time_str, offset)
+                    # Check for case where indexing is started again mid-file
+                    prev_idx = subtitles[-1].index if subtitles else 0
+                    if index < prev_idx:
+                        print(
+                            f'Anomaly in SRT file: {srt_file}, continuing indexing...')
+                        index = prev_idx + 1
+
+                elif timestamp_pattern.match(line):
+                    timestamp_match = timestamp_pattern.match(line)
+                    start_time_str = timestamp_match.group(1)
+                    end_time_str = timestamp_match.group(2)
+
+                    # Check if there's this weird 10h offset
+                    if index == 0 or index == 1:
+                        if start_time_str.startswith('10:'):
+                            self.has_offset = True
+                    start = self._parse_swiss_time_to_timedelta(
+                        start_time_str, self.has_offset)
+                    end = self._parse_swiss_time_to_timedelta(
+                        end_time_str, self.has_offset)
+                else:
+                    content += '\n' + line.rstrip()
+
+                all_data_collected = (index is not None) and (
+                    start is not None) and (end is not None) and (content != '')
+
+                if (line.rstrip() == '' and all_data_collected) or (line == lines[-1] and all_data_collected):
+                    content = content.replace('\n', ' ').rstrip()
+                    subtitle = Subtitle(index, start, end, content)
+                    if self.subtitle_is_valid(subtitle):
+                        subtitles.append(subtitle)
+                    index = None
+                    start = None
+                    end = None
+                    content = ''
+        return subtitles
+
+    def parse_file_normal(self, srt_file: str) -> list[Subtitle]:
+        data = []
+        with open(srt_file, 'r', encoding=self.encoding) as f:
+            srt_generator = srt.parse(f.read())
+            for sub in srt_generator:
+                index = sub.index
+                # Check if the first subtitle starts at 10 hours --> weird time offset in srf data
+                if sub.index == 0 or sub.index == 1:
+                    if sub.start.seconds >= 36000:
+                        self.has_offset = True
+
+                # Check for case where indexing is started again mid-file
+                prev_idx = data[-1].index if data else 0
+                if index < prev_idx:
+                    index = prev_idx + 1
+                    print(
+                        f'Anomaly in SRT file: {srt_file}, continuing indexing...')
+
+                start = sub.start
+                end = sub.end
+                if self.has_offset:
+                    offset = timedelta(seconds=36000)
+                    start = sub.start - offset
+                    end = sub.end - offset
+
+                text = sub.content.replace('\n', ' ')
+                subtitles = Subtitle(index, start, end, text)
+                if self.subtitle_is_valid(subtitles):
+                    data.append(subtitles)
+
+        return data
+
+    def parse_file(self):
+        if self.is_swiss_srt:
+            self.data = self.parse_file_swiss(self.srt_file)
         else:
-            content += '\n' + line
+            self.data = self.parse_file_normal(self.srt_file)
 
-        all_data_collected = (index is not None) and (start is not None) and (end is not None) and (content != '')
+        self.nr_valid_subtitles = len(self.data)
+        self.first_index = self.data[0].index
 
-        if (line==' ' and all_data_collected) or (line == lines[-1] and all_data_collected):
-            content = content.replace('\n', ' ').lstrip().rstrip()
-            # check if content consists of only whitespace
-            if content.isspace() or content == '':
-                continue
-            else:
-                yield Subtitle(index+1, start, end, content)
-                index = None
-                start = None
-                end = None
-                content = ''
+    def subtitle_is_valid(self, sub: Subtitle) -> bool:
+        """Check if a subtitle is valid."""
+        # Faulty case 1: empty content
+        if sub.content.isspace() or sub.content == '':
+            return False
+        # Faulty case 2: faulty timestamps (start > end or start == end)
+        elif sub.start >= sub.end:
+            return False
+        else:
+            return True
 
+    def clean_subtitle_text(self, text: str) -> str:
+        """Clean subtitle text by removing unwanted characters."""
 
-def detect_swiss_srt_format(srt_content):
-    """
-    Detects whether the SRT file is in Swiss-style format.
-    """
-    srt_lines = srt_content.splitlines()
-    # Check if the SRT file is in Swiss-style format
-    second_line = srt_lines[1]
-    if re.search(r'\d{2}:\d{2}:\d{2}:\d{2}', second_line):
-        return True
-    return False
+        orig = text
+        # there is brackets with timestamps (some text 00:00:02 kj)
+        text = re.sub(r'\(.*?\d{2}:\d{2}:\d{2}.*?\)', '', text)
+        # reaplace (über .+?) with ''
+        text = re.sub(r'\(über .+?\)', '', text)
 
+        # 1. Trailing $
+        if text.startswith('$$'):
+            text = text[2:]
+        if text.startswith('$'):
+            text = text[1:]
+        if text.startswith('*'):
+            text = text[1:]
 
-def parse_swiss_time_to_timedelta(time_str: str, offset: bool = False) -> timedelta:
-    """
-    Converts Swiss-style timestamp HH:MM:SS:FF to a timedelta object.
-    """
-    hours, minutes, seconds, frames = map(int, time_str.split(':'))
-    total_seconds = hours * 3600 + minutes * 60 + seconds + \
-        frames / 24  # Assuming 24 fps for the frames
-    if offset:
-        # remove 10 hours offset
-        total_seconds -= 36000
-    return timedelta(seconds=total_seconds)
+        # there is double brackets
+        text = re.sub(r'\(\(.*?\)\)', '', text)
+
+        # remove brackets but keep content
+        text = re.sub(r'\(', '', text)
+        text = re.sub(r'\)', '', text)
+
+        # Remove * and $ when whitespace before and after
+        text = re.sub(r'\s\*\s', ' ', text)
+        text = re.sub(r'\s\$\s', ' ', text)
+
+        # remove several whitespaces in a row
+        text = re.sub(r'\s+', ' ', text)
+
+        # Trailing $
+        if text.startswith('$$'):
+            text = text[2:]
+        if text.startswith('$'):
+            text = text[1:]
+        if text.startswith('*'):
+            text = text[1:]
+
+        final = text.strip()
+        if orig != final:
+            print(f'{orig} --> {final}')
+        return final
 
 
 # AUDIO FUNCTIONS
@@ -466,21 +464,31 @@ def extract_audio_snippet(audio_file: str, start: str, end: str, output_file: st
     return output_file
 
 
-def extract_audio_snippets(audio_file: str, time_stamps: list[tuple[str, str, str]], output_dir: str) -> list[str]:
-    """Extract audio snippets from an audio file given a list of time stamps."""
+def extract_audio_snippets(audio_file: str, time_stamps: list[tuple[timedelta, timedelta, int]], output_dir: str, prefix: Optional[str] = None) -> list[str]:
+    """Extract audio snippets from an audio file given a list of timestamps using timedelta. (Loads the audio file only once)"""
     outfiles = []
     audio = AudioSegment.from_file(audio_file)
+
     for start, end, idx in time_stamps:
-        start_sec = time_to_seconds(start) * 1000
-        end_sec = time_to_seconds(end) * 1000
-        # if start_sec > len(audio):
-        if start_sec > len(audio):
+        start_ms = int(start.total_seconds() * 1000)
+        end_ms = int(end.total_seconds() * 1000)
+
+        if start_ms > len(audio):
             raise ValueError(f'Timestamp out of bounds: {audio_file}')
-        snippet = audio[start_sec:end_sec]
+        
+        # check if it's longer than 30 seconds
+        if end_ms - start_ms > 30000:
+            print(f'Audio snippet too long: {audio_file}')
+            continue
+
+        snippet = audio[start_ms:end_ms]
         audio_basename = os.path.basename(audio_file)
-        outfile = os.path.join(output_dir, f'{idx}_{audio_basename}')
+        filename = f"{prefix}_{idx}_{audio_basename}" if prefix else f"{idx}_{audio_basename}"
+        outfile = os.path.join(output_dir, filename)
+
         snippet.export(outfile, format="wav")
         outfiles.append(outfile)
+
     return outfiles
 
 
@@ -492,18 +500,20 @@ def get_audio_duration(file_path: str) -> float:
     return duration_in_minutes
 
 
-def calculate_total_audio_stats(folder_path):
+def calculate_total_audio_stats(folder_path) -> tuple[float, float, list[float]]:
     """Calculate the total duration of all audio files in a folder."""
     total_duration = 0.0
     nr_files = 0
+    durations = []
     for root, _, files in os.walk(folder_path):
         for filename in files:
             if filename.endswith('.wav'):
                 nr_files += 1
                 file_path = os.path.join(root, filename)
                 total_duration += get_audio_duration(file_path)
+                durations.append(get_audio_duration(file_path))
     avg_duration = total_duration / nr_files
-    return total_duration, avg_duration
+    return total_duration, avg_duration, durations
 
 
 # GENERAL HELPERS
@@ -517,6 +527,7 @@ def time_to_seconds(time_str: str) -> float:
 
 
 def write_tokens_to_file(tokens: list[str], output_file: str) -> str:
+    """Write a list of tokens to a text file, one token per line."""
     with open(output_file, 'w', encoding='utf-8') as f:
         for token in tokens:
             f.write(token + '\n')
@@ -544,6 +555,7 @@ def basic_sentence_tokenizer(text: str) -> list[str]:
 
 
 def get_token_stats(directory: str):
+    """Reads in all text files in a directory and calculates token statistics."""
     data = []
     ids = []
     for file in os.listdir(directory):
@@ -567,7 +579,8 @@ def get_token_stats(directory: str):
                 })
     return pd.DataFrame(data)
 
-def hist_plot(df: pd.DataFrame, col: str, title: str, xlabel: str, save_path: str=None):  
+
+def hist_plot(df: pd.DataFrame, col: str, title: str, xlabel: str, save_path: str = None):
     """Create a histogram plot of a given DataFrame using seaborn"""
     sns.set_theme(style='whitegrid')
     plot = sns.histplot(data=df, x=col, bins=30)
@@ -576,8 +589,6 @@ def hist_plot(df: pd.DataFrame, col: str, title: str, xlabel: str, save_path: st
     if save_path:
         plot.get_figure().savefig(save_path)
     return plot
-    
-
 
 
 def main():
