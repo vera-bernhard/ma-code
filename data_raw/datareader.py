@@ -1,6 +1,7 @@
 import os
 import wave
 import io
+import logging
 from datetime import timedelta
 import re
 from typing import Optional
@@ -19,6 +20,21 @@ NAMESPACES = {
     'tei': 'http://www.tei-c.org/ns/1.0',
     'xml': 'http://www.w3.org/XML/1998/namespace'
 }
+
+log_dir = '../log'
+if not os.path.exists(log_dir):
+    os.makedirs(log_dir)
+
+log_file = os.path.join(log_dir, 'datareader.log')
+
+logging.basicConfig(
+    filename=log_file,
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    filemode='a'
+)
+logging.basicConfig(filename='datareader.log', level=logging.INFO)
+
 
 # ARCHIMOB FUNCTIONS
 def get_archimob_data(recording: str, start: str, end: str, output_dir=None) -> tuple[str, str]:
@@ -83,43 +99,6 @@ def get_archimob_transcription(audio_files: list[str], output_file: str) -> tupl
 
 
 # SWISSTEXT AD FUNCTIONS
-def extract_audio_and_text_span(wav_file: str, srt_file: str, start_idx: int, end_idx: int, outdir: str) -> tuple[str, str]:
-    """Extract a snippet of audio from a WAV file and corresponding text from a SRT file."""
-    audio_files = []
-    text = []
-    filename = os.path.basename(wav_file).rstrip('.wav')
-
-    # Set up temp dir for audio snippets to be stored before concatenation
-    tmp_dir = os.path.join(outdir, f'{filename}_tmp')
-    if not os.path.exists(tmp_dir):
-        os.makedirs(tmp_dir)
-
-    # Parse SRT file and extract audio snippets
-    srt_data = read_srt_file(srt_file, start_idx, end_idx)
-    timestamps = [(sub['start'], sub['end']) for sub in srt_data]
-    text = [sub['text'] for sub in srt_data]
-    audio_files = extract_audio_snippets(wav_file, timestamps, tmp_dir)
-
-    # Rename and if necessary concatenate audio snippets
-    output_audio = f'{start_idx}-{end_idx}_{filename}.wav'
-    output_audio_path = os.path.join(outdir, output_audio)
-
-    if len(audio_files) > 1:
-        concat_audio_files(audio_files, output_audio_path)
-    else:
-        raise ValueError('Error extracting audio snippets')
-
-    # Delete temporary directory and files
-    for file in os.listdir(tmp_dir):
-        os.remove(os.path.join(tmp_dir, file))
-    os.rmdir(tmp_dir)
-
-    # Write text to file, one sentence per line
-    output_text_file = output_audio_path.replace('.wav', '.txt')
-    write_tokens_to_file(text, output_text_file)
-    return output_audio_path, output_text_file
-
-
 def extract_audio_and_text_all(wav_file: str, srt_file: str, outdir: str, prefix: Optional[str]) -> list[tuple[str, str]]:
     """Extract all audio snippets appearing in a SRT file and writes both audio and text to files."""
     # check if wav file ends in .wav
@@ -128,17 +107,17 @@ def extract_audio_and_text_all(wav_file: str, srt_file: str, outdir: str, prefix
             'Looks like the audio file is not passed correctly, please provide a .wav file.')
     audio_files = []
     basename = os.path.basename(wav_file).rstrip('.wav')
-    print(f'Processing {basename}...')
+    logging.info(f'Processing {basename}...')
 
     if already_extracted(srt_file, basename, outdir):
-        print(f'Files for {basename} already extracted.')
+        logging.info(f'Files for {basename} already extracted.')
         return []
     else:
         # remove all partial files
         for file in os.listdir(outdir):
             if basename in file:
                 os.remove(os.path.join(outdir, file))
-                print(f'Removed {file}')
+                logging.info(f'Removed {file} for reprocessing')
 
     srt_data = SRTReader(srt_file)
 
@@ -182,7 +161,7 @@ def match_audio_srt_files(wav_dir: str, srt_dir: str, manual_match: dict) -> lis
                 elif os.path.exists(srt_file_3):
                     srt_file_matched = srt_file_3
                 else:
-                    print(f'No SRT file found for {wav_file}')
+                    logging.warning(f'No SRT file found for {wav_file}')
 
             if srt_file_matched:
                 data.append((wav_file, srt_file_matched))
@@ -298,7 +277,7 @@ class SRTReader():
                     # Check for case where indexing is started again mid-file
                     prev_idx = subtitles[-1].index if subtitles else 0
                     if index < prev_idx:
-                        print(
+                        logging.info(
                             f'Anomaly in SRT file: {srt_file}, continuing indexing...')
                         index = prev_idx + 1
 
@@ -347,7 +326,7 @@ class SRTReader():
                 prev_idx = data[-1].index if data else 0
                 if index < prev_idx:
                     index = prev_idx + 1
-                    print(
+                    logging.info(
                         f'Anomaly in SRT file: {srt_file}, continuing indexing...')
 
                 start = sub.start
@@ -388,10 +367,11 @@ class SRTReader():
         """Clean subtitle text by removing unwanted characters."""
 
         orig = text
+        changed = False
         # there is brackets with timestamps (some text 00:00:02 kj)
         text = re.sub(r'\(.*?\d{2}:\d{2}:\d{2}.*?\)', '', text)
         # reaplace (über .+?) with ''
-        text = re.sub(r'\(über .+?\)', '', text)
+        text = re.sub(r'\(über .+?\)', '', text, flags=re.IGNORECASE)
 
         # 1. Trailing $
         if text.startswith('$$'):
@@ -405,6 +385,17 @@ class SRTReader():
         text = re.sub(r'\(\(.*?\)\)', '', text)
 
         # remove brackets but keep content
+        # get content between brackets
+        matches = re.findall(r'\((.*?)\)', text)
+        for content in matches:
+            # if content is all uppercase, remove brackets and content
+            if content.isupper():
+                text = re.sub(r'\(' + content + r'\)', '', text)
+            # if content is within " ", remove brackets and content
+            elif content.startswith('"') and content.endswith('"'):
+                text = re.sub(r'\(' + content + r'\)', '', text)
+        
+
         text = re.sub(r'\(', '', text)
         text = re.sub(r'\)', '', text)
 
@@ -412,8 +403,9 @@ class SRTReader():
         text = re.sub(r'\s\*\s', ' ', text)
         text = re.sub(r'\s\$\s', ' ', text)
 
-        # remove several whitespaces in a row
-        text = re.sub(r'\s+', ' ', text)
+
+        # remove ...
+        text = re.sub(r'\.\.\.', '', text)
 
         # Trailing $
         if text.startswith('$$'):
@@ -423,9 +415,17 @@ class SRTReader():
         if text.startswith('*'):
             text = text[1:]
 
-        final = text.strip()
-        if orig != final:
-            print(f'{orig} --> {final}')
+        # check if changed before removing whitespaces --> no logging if only whitespaces are removed
+        if orig != text:
+            changed = True
+
+        # remove several whitespaces and leading/trailing whitespaces
+        text = re.sub(r'\s+', ' ', text)
+        final = text.strip().lstrip(' ')
+
+        if changed:
+            logging.info(f'Changed text: {orig} --> {text}')
+       
         return final
 
 
@@ -478,7 +478,7 @@ def extract_audio_snippets(audio_file: str, time_stamps: list[tuple[timedelta, t
         
         # check if it's longer than 30 seconds
         if end_ms - start_ms > 30000:
-            print(f'Audio snippet too long: {audio_file}')
+            logging.warning(f'Audio snippet too long: {audio_file}, skipping...')
             continue
 
         snippet = audio[start_ms:end_ms]
@@ -592,6 +592,7 @@ def hist_plot(df: pd.DataFrame, col: str, title: str, xlabel: str, save_path: st
 
 
 def main():
+    pass
     # output_dir = 'data_samples'
     # # audio_file, tokens_file = get_archimob_data('1082_1', 21, 40, output_dir)
 
@@ -619,10 +620,6 @@ def main():
     # # 25.13396666666665
     # path5 = '/home/vera/Documents/Uni/Master/Master_Thesis/data/TEVOID/TEVOID/1_spntLong_16spkrs'
     # print(calculate_total_audio_duration(path5))
-
-    path6 = '/home/vera/Documents/Uni/Master/Master_Thesis/data/TEVOID/TEVOID'
-    print(calculate_total_audio_duration(path6))
-
 
 if __name__ == "__main__":
 
