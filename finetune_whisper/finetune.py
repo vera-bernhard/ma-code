@@ -28,7 +28,7 @@ random.seed(42)
 
 # add logger
 logging.basicConfig(
-    level=logging.INFO, 
+    level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
         logging.FileHandler("log/preprocess.out"),
@@ -36,6 +36,7 @@ logging.basicConfig(
     ],
     force=True)
 logger = logging.getLogger()
+
 
 @dataclass
 class DataCollatorSpeechSeq2SeqWithPadding:
@@ -60,14 +61,14 @@ class DataCollatorSpeechSeq2SeqWithPadding:
 
         batch["labels"] = labels
 
-        # Add attention mask to avoid warning 
+        # Add attention mask to avoid warning
         attention_mask = batch["attention_mask"] if "attention_mask" in batch else None
         if attention_mask is not None:
             batch["attention_mask"] = attention_mask
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         for key in batch:
             batch[key] = batch[key].to(device)
-        
+
         return batch
 
 
@@ -134,13 +135,14 @@ def load_data_from_file(file_path: str):
     for line in lines:
         audio_file, text_file = line.strip().split("\t")
         text = open(text_file, "r", encoding="utf-8").read()
-        data.append({"audio": {"path": audio_file}, "text": text, "audio_path": audio_file})
+        data.append({"audio": {"path": audio_file},
+                    "text": text, "audio_path": audio_file})
 
     data = Dataset.from_list(data)
     return data
 
 
-def preprocess(dataset: DatasetDict, whisper_size: str = 'small', outdir: str = "./data_prepared/srf_ad_feat"):
+def preprocess(dataset: DatasetDict, whisper_size: str = 'small', outdir: str = "./data_prepared/srf_ad_feat") -> str:
     logger.info('Starting data preprocessing...')
     tokenizer = WhisperTokenizer.from_pretrained(
         f"openai/whisper-{whisper_size}")
@@ -149,43 +151,65 @@ def preprocess(dataset: DatasetDict, whisper_size: str = 'small', outdir: str = 
 
     os.makedirs(outdir, exist_ok=True)
 
-    def preprocess_function(batch):
-        audio_array = batch["audio"]["array"]
-        if audio_array is None or len(audio_array) == 0:
+    def preprocess_and_save(batch: dict[dict], idx: int, split_name: str) -> tuple[Dict, str]:
+        audio_array = batch['audio']['array']
+        if audio_array is None or audio_array.size == 0:
             logger.warning(f"Faulty audio: {batch['audio']['path']}")
             return None
 
         audio_input = feature_extractor(
-            audio_array,
-            sampling_rate=batch["audio"]["sampling_rate"],
-            return_tensors="pt"
-        )
-
-        # Manually pad the input features to 3000 (cause just setting padding="max_length" doesn't work)
+            audio_array, sampling_rate=batch['audio']['sampling_rate'], return_tensors="pt")
         input_features = audio_input["input_features"]
-        if input_features.shape[-1] < 3000:
-            pad_width = 3000 - input_features.shape[-1]
-            input_features = torch.nn.functional.pad(input_features, (0, pad_width), mode='constant', value=0)
-        else:
-            input_features = input_features[:, :3000]
-        
-        if input_features.shape[-1] != 3000:
-            logger.warning(f"Warning: Expected 3000 mel features, got {input_features.shape[-1]}")
-        
-        token_data = tokenizer(batch["text"], padding="max_length", truncation=True, max_length=448, return_tensors="pt")
-        return {
-            "input_features": input_features[0],  # Take the first element for batch processing
+        input_features = torch.nn.functional.pad(input_features, (0, max(
+            0, 3000 - input_features.shape[-1])), mode='constant', value=0)
+        input_features = input_features[:, :3000]
+
+        token_data = tokenizer(batch["text"], padding="max_length",
+                               truncation=True, max_length=448, return_tensors="pt")
+
+        processed_data = {
+            "input_features": input_features[0],
             "labels": token_data.input_ids[0],
             "attention_mask": token_data.attention_mask[0],
-            "audio_path": batch["audio_path"]  # Keep audio path
-
+            "audio_path": batch["audio_path"]
         }
+        file_path = os.path.join(outdir, f"{split_name}_data_{idx}.pt")
+        torch.save(processed_data, file_path)
+        return processed_data, file_path
 
-    dataset = dataset.map(preprocess_function, remove_columns=[
-                          "audio", "text"], num_proc=4)
-    logger.info(f'Saving data set to {outdir}')
-    dataset.save_to_disk(outdir)
-    return dataset
+    intermediate_files = []
+    processed_data_dict = {}
+
+    for split_name, split_dataset in dataset.items():
+        logger.info(f"Processing split: {split_name}")
+        processed_samples = []
+
+        for idx, example in enumerate(tqdm(split_dataset, desc=f"Preprocessing {split_name}")):
+            try:
+                data, file = preprocess_and_save(example, idx, split_name)
+                if data:
+                    processed_samples.append(data)
+                    intermediate_files.append(file)
+            except Exception as e:
+                logger.error(
+                    f"Failed to process {split_name} index {idx}: {e}")
+
+        processed_data_dict[split_name] = processed_samples
+
+    if processed_data_dict:
+        final_dataset_dict = DatasetDict({
+            split_name: Dataset.from_list(processed_samples)
+            for split_name, processed_samples in processed_data_dict.items()
+        })
+        final_dataset_dict.save_to_disk(outdir)
+        logger.info(f"Preprocessed dataset saved to {outdir}")
+
+    # Delete intermediate files
+    for file in intermediate_files:
+        os.remove(file)
+
+    logger.info('All splits processed and saved successfully.')
+    return outdir
 
 
 def fine_tune(feat_dir: str, whisper_size: str = 'small', save_path: str = "./finetune_whisper"):
@@ -244,19 +268,22 @@ def predict(trainer: Trainer, dataset: Dataset, outfile: str, model_path: str = 
     if model_path:
         print(f"Loading model from {model_path}...")
         model = WhisperForConditionalGeneration.from_pretrained(model_path)
-  
+
     # Case 2: Trainer object
     elif trainer:
         model = trainer.model
 
     # Case 3: Pre-trained model only
     else:
-        print(f"Loading pre-trained Whisper model: openai/whisper-{whisper_size}...")
-        model = WhisperForConditionalGeneration.from_pretrained(f"openai/whisper-{whisper_size}")
+        print(
+            f"Loading pre-trained Whisper model: openai/whisper-{whisper_size}...")
+        model = WhisperForConditionalGeneration.from_pretrained(
+            f"openai/whisper-{whisper_size}")
 
     model.to(device)
 
-    processor = WhisperProcessor.from_pretrained(f"openai/whisper-{whisper_size}")
+    processor = WhisperProcessor.from_pretrained(
+        f"openai/whisper-{whisper_size}")
     model.eval()
 
     with open(outfile, mode='a', newline='', encoding='utf-8') as f:
@@ -268,12 +295,16 @@ def predict(trainer: Trainer, dataset: Dataset, outfile: str, model_path: str = 
         with torch.no_grad():
             for i in tqdm(range(len(dataset)), desc="Predicting"):
                 batch = dataset[i]
-                input_features = torch.tensor(batch["input_features"]).unsqueeze(0).to(device)
+                input_features = torch.tensor(
+                    batch["input_features"]).unsqueeze(0).to(device)
                 attention_mask = batch.get("attention_mask", None)
 
-                generated_ids = model.generate(input_features, attention_mask=attention_mask)
-                pred_text = processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
-                true_text = processor.batch_decode(torch.tensor(batch["labels"]).unsqueeze(0), skip_special_tokens=True)[0]
+                generated_ids = model.generate(
+                    input_features, attention_mask=attention_mask)
+                pred_text = processor.batch_decode(
+                    generated_ids, skip_special_tokens=True)[0]
+                true_text = processor.batch_decode(torch.tensor(
+                    batch["labels"]).unsqueeze(0), skip_special_tokens=True)[0]
                 audio_file = batch.get("audio_path", "Unknown")
 
                 writer.writerow([audio_file, true_text, pred_text])
@@ -309,13 +340,14 @@ if __name__ == "__main__":
     sizes = ['small', 'medium', 'large']
 
     dataset = load_custom_dataset(train_file, val_file, test_file)
-    dataset = preprocess(dataset, model_size, output_feat_path)
+    output_feat_path = preprocess(dataset, model_size, output_feat_path)
 
     # load preprocessed dataset
-    # dataset = DatasetDict.load_from_disk(output_feat_path)
+    dataset = DatasetDict.load_from_disk(output_feat_path)
 
     # let not fine-tuned model predict on test set
-    # predict(None, dataset["test"], f"predictions_whisper_{model_size}_untrained.csv",
-    #         model_path=None, whisper_size=model_size)
+    predict(None, dataset["test"], f"predictions_whisper_{model_size}_untrained.csv",
+            model_path=None, whisper_size=model_size)
 
-    # fine_tune(output_feat_path, model_size, save_path=f"./fine_tuned_whisper_{model_size}_{subset}")
+    fine_tune(output_feat_path, model_size,
+              save_path=f"./fine_tuned_whisper_{model_size}")
