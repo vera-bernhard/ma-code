@@ -233,8 +233,9 @@ def fine_tune(feat_dir: str, whisper_size: str = 'small', save_path: str = "./fi
         eval_steps=500,
         per_device_train_batch_size=4,
         per_device_eval_batch_size=4,
-        save_total_limit=2,
+        save_strategy="steps",
         save_steps=500,
+        save_total_limit=1,
         logging_dir="./logs",
         learning_rate=1e-5,
         warmup_steps=500,
@@ -242,7 +243,9 @@ def fine_tune(feat_dir: str, whisper_size: str = 'small', save_path: str = "./fi
         weight_decay=0.01,
         fp16=True,
         push_to_hub=False,
-        report_to="wandb"
+        report_to="wandb",
+        metric_for_best_model="eval_loss",
+        load_best_model_at_end=True,
     )
 
     trainer = Trainer(
