@@ -223,11 +223,22 @@ def load_data_splits(feat_dir: str, subset: float = 1.0):
 
 
 def fine_tune(feat_dir: str, whisper_size: str = 'small', save_path: str = "./finetune_whisper", batch_size: int = 8, epochs: int = 3, logger: logging.Logger = None, subset: float = 1.0):
+    logger.info("Loading data splits...") if logger else print(
+        "Loading data splits...")
     dataset = load_data_splits(feat_dir, subset=subset)
 
     # TODO: some redundancy as listdir is called in load_data_splits already
     num_train_samples = len(os.listdir(os.path.join(feat_dir, "train")))
-    max_steps = num_train_samples // batch_size
+    if subset < 1:
+        nr_subset = int(subset * num_train_samples)
+        logger.info(
+            f"Using {nr_subset} samples out of {num_train_samples} for training") if logger else print(
+            f"Using {nr_subset} samples out of {num_train_samples} for training")
+        num_train_samples = nr_subset
+        if num_train_samples == 0:
+            raise ValueError(
+                "The subset ratio is too low. No training samples available")
+    max_steps = max(num_train_samples // batch_size, 1) * epochs
 
     # dataset = DatasetDict.load_from_disk(feat_dir)
     model = WhisperForConditionalGeneration.from_pretrained(
@@ -267,7 +278,6 @@ def fine_tune(feat_dir: str, whisper_size: str = 'small', save_path: str = "./fi
         report_to="wandb",
         metric_for_best_model="eval_loss",
         load_best_model_at_end=True,
-        num_train_epochs=epochs,
         run_name=f'finetune-whisper-{whisper_size}_{date}'
     )
 
@@ -291,23 +301,22 @@ def fine_tune(feat_dir: str, whisper_size: str = 'small', save_path: str = "./fi
     model.save_pretrained(save_path)
     logger.info("Prediction on test set...") if logger else print(
         "Prediction on test set...")
-    predict(trainer, dataset["test"], "predictions.csv",
+    pred_file = os.path.join(save_path, "predictions.csv")
+    predict(trainer, dataset["test"], pred_file,
             whisper_size=whisper_size, logger=logger)
 
 
 def compute_metrics_wrapper(processor: WhisperProcessor):
     def compute_metrics(pred):
-        pred_ids = pred.predictions
+        logits, _ = pred.predictions # pred.predictions is a tuple with the first element being the predicted ids, second element is the logits
         label_ids = pred.label_ids
-
-        pred_str = processor.batch_decode(pred_ids, skip_special_tokens=True)
-        # Ignore -100 tokens
         label_ids[label_ids == -100] = processor.tokenizer.pad_token_id
+        pred_ids = logits.argmax(axis=-1)
+        pred_str = processor.batch_decode(pred_ids, skip_special_tokens=True)
         label_str = processor.batch_decode(label_ids, skip_special_tokens=True)
         wer_score = wer(label_str, pred_str)
         cer_score = cer(label_str, pred_str)
-
-        return {"wer": wer_score, "cer": cer_score}
+        return {"wer": 100*wer_score, "cer": 100*cer_score}
 
     return compute_metrics
 
@@ -385,7 +394,7 @@ def evaluate(pred_file: str) -> dict:
     pred_texts = df["pred_text"].to_list()
     wer_score = wer(true_texts, pred_texts)
     cer_score = cer(true_texts, pred_texts)
-    return {"wer": wer_score, "cer": cer_score}
+    return {"wer": 100*wer_score, "cer": 100*cer_score}
 
 
 def setup_logger(log_file: str) -> logging.Logger:
