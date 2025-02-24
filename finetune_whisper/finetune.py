@@ -222,7 +222,7 @@ def load_data_splits(feat_dir: str, subset: float = 1.0):
     })
 
 
-def fine_tune(feat_dir: str, whisper_size: str = 'small', save_path: str = "./finetune_whisper", batch_size: int = 4, epochs: int = 3, logger: logging.Logger = None, subset: float = 1.0):
+def fine_tune(feat_dir: str, whisper_size: str = 'small', save_path: str = "./finetune_whisper", batch_size: int = 8, epochs: int = 3, logger: logging.Logger = None, subset: float = 1.0):
     dataset = load_data_splits(feat_dir, subset=subset)
 
     # TODO: some redundancy as listdir is called in load_data_splits already
@@ -431,7 +431,7 @@ def init_argparse():
 
     parser.add_argument("--model_save_dir", type=str,
                         help="Path to save the fine-tuned model", default='')
-    parser.add_argument("--batch_size", type=int, default=4,
+    parser.add_argument("--batch_size", type=int, default=8,
                         help="Batch size for training")
     parser.add_argument("--epochs", type=int, default=3,
                         help="Number of epochs for training")
