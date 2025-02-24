@@ -15,7 +15,7 @@ from transformers import (
     WhisperTokenizer,
     WhisperFeatureExtractor
 )
-from jiwer import wer
+from jiwer import wer, cer
 from tqdm import tqdm
 from datasets import DatasetDict, Audio, Dataset, IterableDataset
 import pandas as pd
@@ -277,6 +277,7 @@ def fine_tune(feat_dir: str, whisper_size: str = 'small', save_path: str = "./fi
         train_dataset=dataset["train"],
         eval_dataset=dataset["validation"],
         data_collator=data_collator,
+        compute_metrics=compute_metrics_wrapper(processor),
     )
 
     logger.info("Starting training...") if logger else print(
@@ -293,6 +294,20 @@ def fine_tune(feat_dir: str, whisper_size: str = 'small', save_path: str = "./fi
     predict(trainer, dataset["test"], "predictions.csv",
             whisper_size=whisper_size, logger=logger)
 
+def compute_metrics_wrapper(processor: WhisperProcessor):
+    def compute_metrics(pred):
+        pred_ids = pred.predictions
+        label_ids = pred.label_ids
+
+        pred_str = processor.batch_decode(pred_ids, skip_special_tokens=True)
+        label_ids[label_ids == -100] = processor.tokenizer.pad_token_id  # Ignore -100 tokens
+        label_str = processor.batch_decode(label_ids, skip_special_tokens=True)
+        wer_score = wer(label_str, pred_str)
+        cer_score = cer(label_str, pred_str)
+
+        return {"wer": wer_score, "cer": cer_score}
+    
+    return compute_metrics
 
 def predict(trainer: Trainer, dataset: Union[Dataset, IterableDataset], outfile: str, model_path: str = None, whisper_size: str = 'small', data_size: int = None, logger: logging.Logger = None):
 
@@ -361,12 +376,13 @@ def predict(trainer: Trainer, dataset: Union[Dataset, IterableDataset], outfile:
         f"Predictions saved to {outfile}")
 
 
-def evaluate(pred_file: str) -> float:
+def evaluate(pred_file: str) -> dict:
     df = pd.read_csv(pred_file)
     true_texts = df["true_text"].to_list()
     pred_texts = df["pred_text"].to_list()
     wer_score = wer(true_texts, pred_texts)
-    return wer_score
+    cer_score = cer(true_texts, pred_texts)
+    return {"wer": wer_score, "cer": cer_score}
 
 
 def setup_logger(log_file: str) -> logging.Logger:
