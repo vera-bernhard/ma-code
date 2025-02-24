@@ -221,9 +221,11 @@ def load_data_generator(split_dir: str, split: str, subset: float = 1.0) -> Gene
 
 
 def load_data_split(split_dir: str, split: str, subset: float = 1.0) -> tuple[IterableDataset, int]:
+    logger.info(f"Loading split {split} in {split_dir}")
     files = os.listdir(os.path.join(split_dir, split))
     if subset < 1:
         files = files[:int(subset * len(files))]
+    logger.info(f'Counting {len(files)} files in {split}')
     return IterableDataset.from_generator(
         lambda: load_data_generator(split_dir, split, subset)), len(files)
 
@@ -257,8 +259,12 @@ def fine_tune(feat_dir: str, whisper_size: str = 'small', save_path: str = "./fi
 
     data_collator = DataCollatorSpeechSeq2SeqWithPadding(processor=processor)
 
+    # check if save_path exists
+    if not os.path.exists(save_path):
+        os.makedirs(save_path)
+
     training_args = TrainingArguments(
-        output_dir="./finetune_whisper",
+        output_dir=save_path,
         eval_strategy="steps",
         eval_steps=500,
         per_device_train_batch_size=batch_size,
@@ -348,11 +354,8 @@ def predict(trainer: Trainer, dataset: Union[Dataset, IterableDataset], outfile:
                 true_text = processor.batch_decode(
                     batch["labels"].clone().detach().unsqueeze(0), skip_special_tokens=True)[0]
                 audio_file = batch.get("audio_path", "Unknown")
-
                 writer.writerow([audio_file, true_text, pred_text])
-
-    print(f"Predictions saved to {outfile}")
-
+                f.flush()
 
 def compute_metrics(pred, model_size: str = 'small'):
     processor = WhisperProcessor.from_pretrained(
@@ -387,9 +390,8 @@ if __name__ == "__main__":
     # load preprocessed datasez
 
     # # let not fine-tuned model predict on test set
-    # test_set, nr_test_set = load_data_split(output_feat_path, "test", 0.01)
-    # predict(None, test_set, f"predictions_whisper_{model_size}_untrained.csv",
+    test_set, nr_test_set = load_data_split(output_feat_path, "test")
+    # predict(None, test_set, f"finetune_whisper/test_predictions_whisper_{model_size}_untrained.csv",
     # model_path = None, whisper_size = model_size, data_size = nr_test_set)
 
-    fine_tune(output_feat_path, model_size,
-              save_path=f"./fine_tuned_whisper_{model_size}")
+    fine_tune(output_feat_path, model_size, save_path=f"./fine_tuned_whisper_{model_size}")
