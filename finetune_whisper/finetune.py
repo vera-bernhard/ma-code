@@ -13,7 +13,8 @@ from transformers import (
     TrainingArguments,
     Trainer,
     WhisperTokenizer,
-    WhisperFeatureExtractor
+    WhisperFeatureExtractor,
+    GenerationConfig
 )
 from jiwer import wer, cer
 from tqdm import tqdm
@@ -207,8 +208,10 @@ def load_data_generator(split_dir: str, split: str = None, subset: float = 1.0) 
             file_path = os.path.join(split_dir, split, file_name)
         else:
             file_path = os.path.join(split_dir, file_name)
-        yield torch.load(file_path, weights_only=True)
-
+        data = torch.load(file_path, weights_only=True, map_location="cpu")
+        yield data
+        del data
+        torch.cuda.empty_cache()
 
 def load_data_split(split_dir: str, subset: float = 1.0) -> tuple[IterableDataset, int]:
     return IterableDataset.from_generator(lambda: load_data_generator(split_dir, subset=subset)), len(os.listdir(split_dir))
@@ -241,8 +244,12 @@ def fine_tune(feat_dir: str, whisper_size: str = 'small', save_path: str = "./fi
     max_steps = max(num_train_samples // batch_size, 1) * epochs
 
     # dataset = DatasetDict.load_from_disk(feat_dir)
-    model = WhisperForConditionalGeneration.from_pretrained(
-        f"openai/whisper-{whisper_size}")
+    model_name = f"openai/whisper-{whisper_size}"
+    model = WhisperForConditionalGeneration.from_pretrained(model_name)
+
+    # Specifically set the generation config for the model to prevent UserWarning
+    gen_config = GenerationConfig.from_pretrained(model_name)
+    model.generation_config = gen_config
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
@@ -250,7 +257,7 @@ def fine_tune(feat_dir: str, whisper_size: str = 'small', save_path: str = "./fi
     processor = WhisperProcessor.from_pretrained(
         f"openai/whisper-{whisper_size}")
 
-    wandb.init(project="finetune-whisper")
+    wandb.init(project="finetune-whisper", settings=wandb.Settings(start_method="fork"))
 
     data_collator = DataCollatorSpeechSeq2SeqWithPadding(processor=processor)
     date = datetime.now().strftime("%Y%m%d_%H%M")
@@ -264,16 +271,17 @@ def fine_tune(feat_dir: str, whisper_size: str = 'small', save_path: str = "./fi
         eval_strategy="steps",
         eval_steps=500,
         per_device_train_batch_size=batch_size,
-        per_device_eval_batch_size=batch_size,
+        per_device_eval_batch_size=max(1, batch_size // 2),
         save_strategy="steps",
         save_steps=500,
         save_total_limit=1,
-        logging_dir="./logs",
         learning_rate=1e-5,
         warmup_steps=500,
         max_steps=max_steps,
         weight_decay=0.01,
         fp16=True,
+        gradient_checkpointing=True, # Reduce Memory
+        eval_accumulation_steps=1, # Reduce Memory
         push_to_hub=False,
         report_to="wandb",
         metric_for_best_model="eval_loss",
@@ -288,10 +296,12 @@ def fine_tune(feat_dir: str, whisper_size: str = 'small', save_path: str = "./fi
         eval_dataset=dataset["validation"],
         data_collator=data_collator,
         compute_metrics=compute_metrics_wrapper(processor),
+        preprocess_logits_for_metrics=preproces_logits_for_metrics
     )
 
     logger.info("Starting training...") if logger else print(
         "Starting training...")
+    torch.cuda.empty_cache()
     trainer.train()
     # check if save_path exists
     if not os.path.exists(save_path):
@@ -308,10 +318,9 @@ def fine_tune(feat_dir: str, whisper_size: str = 'small', save_path: str = "./fi
 
 def compute_metrics_wrapper(processor: WhisperProcessor):
     def compute_metrics(pred):
-        logits, _ = pred.predictions # pred.predictions is a tuple with the first element being the predicted ids, second element is the logits
+        pred_ids, _ = pred.predictions # pred.predictions is a tuple with the first element being the predicted ids, second element is the logits
         label_ids = pred.label_ids
         label_ids[label_ids == -100] = processor.tokenizer.pad_token_id
-        pred_ids = logits.argmax(axis=-1)
         pred_str = processor.batch_decode(pred_ids, skip_special_tokens=True)
         label_str = processor.batch_decode(label_ids, skip_special_tokens=True)
         wer_score = wer(label_str, pred_str)
@@ -319,6 +328,11 @@ def compute_metrics_wrapper(processor: WhisperProcessor):
         return {"wer": 100*wer_score, "cer": 100*cer_score}
 
     return compute_metrics
+
+def preproces_logits_for_metrics(logits, labels):
+    # Fix to prevent memory leeks in trainer s.https://discuss.huggingface.co/t/cuda-out-of-memory-when-using-trainer-with-compute-metrics/2941/13
+    pred_ids = logits[0].argmax(axis=-1)
+    return pred_ids, labels
 
 
 def predict(trainer: Trainer, dataset: Union[Dataset, IterableDataset], outfile: str, model_path: str = None, whisper_size: str = 'small', data_size: int = None, logger: logging.Logger = None):
