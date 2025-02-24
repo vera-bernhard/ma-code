@@ -1,9 +1,12 @@
 import os
 import random
-import torch
-import pandas as pd
-import wandb
-from datasets import DatasetDict, Audio, Dataset, IterableDataset
+import csv
+import argparse
+import logging
+from datetime import datetime
+from dataclasses import dataclass
+from typing import Any, Dict, List, Union, Generator
+
 from transformers import (
     WhisperForConditionalGeneration,
     WhisperProcessor,
@@ -13,39 +16,16 @@ from transformers import (
     WhisperFeatureExtractor
 )
 from jiwer import wer
-from dataclasses import dataclass
-from typing import Any, Dict, List, Union, Generator
 from tqdm import tqdm
-import csv
-import logging
-import sys
+from datasets import DatasetDict, Audio, Dataset, IterableDataset
+import pandas as pd
+import torch
+import wandb
 
 # Set seed for reproducibility
 random.seed(42)
 
 # based on https://huggingface.co/learn/audio-course/chapter5/fine-tuning
-
-
-# add logger
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler("log/preprocess.out"),
-    ],
-    force=True
-)
-
-# logger for console
-console_handler = logging.StreamHandler(sys.stdout)
-console_handler.setLevel(logging.WARNING)
-console_handler.setFormatter(logging.Formatter(
-    '%(asctime)s - %(levelname)s - %(message)s'))
-
-logger = logging.getLogger()
-logger.addHandler(console_handler)
-
-
 @dataclass
 class DataCollatorSpeechSeq2SeqWithPadding:
     processor: Any
@@ -73,19 +53,15 @@ class DataCollatorSpeechSeq2SeqWithPadding:
         attention_mask = batch["attention_mask"] if "attention_mask" in batch else None
         if attention_mask is not None:
             batch["attention_mask"] = attention_mask
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        for key in batch:
-            batch[key] = batch[key].to(device)
 
         return batch
 
 
-def make_split(data_dir: str, output_dir: str, train_ratio: float = 0.8, dataset_name: str = "srf_ad", subset: float = 1):
+def make_split(data_dir: str, output_dir: str, train_ratio: float = 0.8, dataset_name: str = "srf_ad", subset: float = 1) -> tuple[str, str, str]:
     """Given a directory with wav files and corresponding transcript files, creates a train, validation, and test split
     i.e. it writes three text files with the paths to the audio and transcript files for each split.
 
     """
-    logger.info(f"Making the split in {output_dir}")
     files = [f for f in os.listdir(data_dir) if f.endswith(".wav")]
     files.sort()
     random.shuffle(files)
@@ -117,12 +93,11 @@ def make_split(data_dir: str, output_dir: str, train_ratio: float = 0.8, dataset
     )
 
 
-def load_custom_dataset(train_file: str, val_file: str, test_file: str):
+def load_custom_dataset(train_file: str, val_file: str, test_file: str, logger: logging.Logger = None) -> DatasetDict:
     """Loads a custom dataset from a given train, validation, and test file."""
-    logger.info(f"Loading splits")
-    train_data = load_data_from_file(train_file)
-    val_data = load_data_from_file(val_file)
-    test_data = load_data_from_file(test_file)
+    train_data = load_data_from_file(train_file, logger)
+    val_data = load_data_from_file(val_file, logger)
+    test_data = load_data_from_file(test_file, logger)
 
     dataset = DatasetDict({
         "train": train_data,
@@ -134,9 +109,10 @@ def load_custom_dataset(train_file: str, val_file: str, test_file: str):
     return dataset
 
 
-def load_data_from_file(file_path: str):
+def load_data_from_file(file_path: str, logger: logging.Logger = None) -> Dataset:
     """Loads dataset from a given text file with wav-transcript pairs."""
-    logging.info(f"Loading from {file_path}")
+    logger.info(f"Loading data from {file_path}") if logger else print(
+        f"Loading from {file_path}")
     with open(file_path, "r", encoding="utf-8") as f:
         lines = f.readlines()
     data = []
@@ -150,7 +126,7 @@ def load_data_from_file(file_path: str):
     return data
 
 
-def preprocess(dataset: DatasetDict, whisper_size: str = 'small', outdir: str = "./data_prepared/srf_ad_feat") -> str:
+def preprocess(dataset: DatasetDict, whisper_size: str = 'small', outdir: str = "./data_prepared/srf_ad_feat", logger: logging.Logger = None) -> str:
     logger.info('Starting data preprocessing...')
     tokenizer = WhisperTokenizer.from_pretrained(
         f"openai/whisper-{whisper_size}")
@@ -211,21 +187,23 @@ def preprocess(dataset: DatasetDict, whisper_size: str = 'small', outdir: str = 
     return outdir
 
 
-def load_data_generator(split_dir: str, split: str, subset: float = 1.0) -> Generator:
-    file_paths = sorted(os.listdir(os.path.join(split_dir, split)))
+def load_data_generator(split_dir: str, split: str = None, subset: float = 1.0) -> Generator:
+    if split is not None:
+        file_paths = sorted(os.listdir(os.path.join(split_dir, split)))
+    else:
+        file_paths = sorted(os.listdir(split_dir))
     if subset < 1:
         file_paths = file_paths[:int(subset * len(file_paths))]
     for file_name in file_paths:
-        file_path = os.path.join(split_dir, split, file_name)
+        if split is not None:
+            file_path = os.path.join(split_dir, split, file_name)
+        else:
+            file_path = os.path.join(split_dir, file_name)
         yield torch.load(file_path, weights_only=True)
 
 
-def load_data_split(split_dir: str, split: str, subset: float = 1.0) -> tuple[IterableDataset, int]:
-    files = os.listdir(os.path.join(split_dir, split))
-    if subset < 1:
-        files = files[:int(subset * len(files))]
-    return IterableDataset.from_generator(
-        lambda: load_data_generator(split_dir, split, subset)), len(files)
+def load_data_split(split_dir: str, subset: float = 1.0) -> tuple[IterableDataset, int]:
+    return IterableDataset.from_generator(lambda: load_data_generator(split_dir, subset=subset)), len(os.listdir(split_dir))
 
 
 def load_data_splits(feat_dir: str, subset: float = 1.0):
@@ -236,8 +214,8 @@ def load_data_splits(feat_dir: str, subset: float = 1.0):
     })
 
 
-def fine_tune(feat_dir: str, whisper_size: str = 'small', save_path: str = "./finetune_whisper", batch_size: int = 4):
-    dataset = load_data_splits(feat_dir)
+def fine_tune(feat_dir: str, whisper_size: str = 'small', save_path: str = "./finetune_whisper", batch_size: int = 4, epochs: int = 3, logger: logging.Logger = None, subset: float = 1.0):
+    dataset = load_data_splits(feat_dir, subset=subset)
 
     # TODO: some redundancy as listdir is called in load_data_splits already
     num_train_samples = len(os.listdir(os.path.join(feat_dir, "train")))
@@ -256,7 +234,7 @@ def fine_tune(feat_dir: str, whisper_size: str = 'small', save_path: str = "./fi
     wandb.init(project="finetune-whisper")
 
     data_collator = DataCollatorSpeechSeq2SeqWithPadding(processor=processor)
-
+    date = datetime.now().strftime("%Y%m%d_%H%M")
     training_args = TrainingArguments(
         output_dir="./finetune_whisper",
         eval_strategy="steps",
@@ -270,13 +248,14 @@ def fine_tune(feat_dir: str, whisper_size: str = 'small', save_path: str = "./fi
         learning_rate=1e-5,
         warmup_steps=500,
         max_steps=max_steps,
-        num_train_epochs=3,
         weight_decay=0.01,
         fp16=True,
         push_to_hub=False,
         report_to="wandb",
         metric_for_best_model="eval_loss",
         load_best_model_at_end=True,
+        num_train_epochs=epochs,
+        run_name=f'finetune-whisper-{whisper_size}_{date}'
     )
 
     trainer = Trainer(
@@ -287,15 +266,21 @@ def fine_tune(feat_dir: str, whisper_size: str = 'small', save_path: str = "./fi
         data_collator=data_collator,
     )
 
+    logger.info("Starting training...") if logger else print(
+        "Starting training...")
     trainer.train()
     # check if save_path exists
     if not os.path.exists(save_path):
         os.makedirs(save_path)
+    logger.info(f"Saving model to {save_path}") if logger else print(
+        f"Saving model to {save_path}")
     model.save_pretrained(save_path)
-    predict(trainer, dataset["test"], "predictions.csv")
+    logger.info("Prediction on test set...") if logger else print(
+        "Prediction on test set...")
+    predict(trainer, dataset["test"], "predictions.csv", whisper_size=whisper_size, logger=logger)
 
 
-def predict(trainer: Trainer, dataset: Union[Dataset, IterableDataset], outfile: str, model_path: str = None, whisper_size: str = 'small', data_size: int = None):
+def predict(trainer: Trainer, dataset: Union[Dataset, IterableDataset], outfile: str, model_path: str = None, whisper_size: str = 'small', data_size: int = None, logger: logging.Logger = None):
 
     # Note: iterable datasets require the data_size to be provided, as they do not have a length attribute
     if type(dataset) == IterableDataset:
@@ -307,25 +292,31 @@ def predict(trainer: Trainer, dataset: Union[Dataset, IterableDataset], outfile:
 
     # Case 1: Fine-tuned model
     if model_path:
-        print(f"Loading model from {model_path}...")
+        logger.info(f"Loading fine-tuned model from {model_path}") if logger else print(
+            f"Loading fine-tuned model from {model_path}")
         model = WhisperForConditionalGeneration.from_pretrained(model_path)
+        processor = WhisperProcessor.from_pretrained(model_path)
 
     # Case 2: Trainer object
     elif trainer:
         model = trainer.model
+        processor = trainer.data_collator.processor
 
     # Case 3: Pre-trained model only
     else:
-        print(
+        logger.info(
+            f"Loading pre-trained Whisper model: openai/whisper-{whisper_size}...") if logger else print(
             f"Loading pre-trained Whisper model: openai/whisper-{whisper_size}...")
         model = WhisperForConditionalGeneration.from_pretrained(
             f"openai/whisper-{whisper_size}")
+        processor = WhisperProcessor.from_pretrained(
+            f"openai/whisper-{whisper_size}")
 
     model.to(device)
-
-    processor = WhisperProcessor.from_pretrained(
-        f"openai/whisper-{whisper_size}")
     model.eval()
+    if os.path.exists(outfile):
+        logger.warning(f"File {outfile} already exists. Deleting...")
+        os.remove(outfile)
     with open(outfile, mode='a', newline='', encoding='utf-8') as f:
         writer = csv.writer(f)
 
@@ -350,46 +341,223 @@ def predict(trainer: Trainer, dataset: Union[Dataset, IterableDataset], outfile:
                 audio_file = batch.get("audio_path", "Unknown")
 
                 writer.writerow([audio_file, true_text, pred_text])
+                f.flush()
 
-    print(f"Predictions saved to {outfile}")
+    logger.info(f"Predictions saved to {outfile}") if logger else print(f"Predictions saved to {outfile}")
 
 
-def compute_metrics(pred, model_size: str = 'small'):
-    processor = WhisperProcessor.from_pretrained(
-        f"openai/whisper-{model_size}")
-    pred_ids = pred.predictions
-    label_ids = pred.label_ids
+def evaluate(pred_file: str) -> float:
+    df = pd.read_csv(pred_file)
+    true_texts = df["true_text"].to_list()
+    pred_texts = df["pred_text"].to_list()
+    wer_score = wer(true_texts, pred_texts)
+    return wer_score
+ 
 
-    label_ids[label_ids == -100] = processor.tokenizer.pad_token_id
+def setup_logger(log_file: str) -> logging.Logger:
+    """Set up logging configuration and return the logger."""
+    log_dir = os.path.dirname(log_file)
+    os.makedirs(log_dir, exist_ok=True)  # Ensure log directory exists
 
-    pred_texts = processor.batch_decode(pred_ids, skip_special_tokens=True)
-    label_texts = processor.batch_decode(label_ids, skip_special_tokens=True)
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(levelname)s - %(message)s",
+        handlers=[
+            logging.FileHandler(log_file),
+        ],
+        force=True
+    )
+    logger = logging.getLogger()
+    return logger
 
-    wer_score = wer(label_texts, pred_texts)
 
-    return {"wer": wer_score}
+def init_argparse():
+    parser = argparse.ArgumentParser(
+        description="Fine-tune the Whisper model on the SRF AD dataset")
+
+    parser.add_argument("job", type=str, choices=[
+                        "train", "predict", "preprocess", "split", "evaluate"], help="The job to perform")
+    # add log file
+    parser.add_argument("--log_file", type=str,
+                        help="Path to log file", required=True)
+
+    parser.add_argument("--raw_data", type=str,
+                        help="Path to directory with audio and transcript files", default='')
+    parser.add_argument("--split_dir", type=str,
+                        help="Path to directory with split files", default='')
+    parser.add_argument("--split_ratio", type=float,
+                        default=0.8, help="Ratio for train split")
+    parser.add_argument("--subset_ratio", type=float,
+                        default=1.0, help="Ratio of data to use")
+
+    parser.add_argument("--whisper_size", type=str, default="small",
+                        choices=["small", "medium", "large"], help="Size of the Whisper model")
+    parser.add_argument("--feat_dir", type=str,
+                        help="Path to directory with preprocessed data", default='')
+
+    parser.add_argument("--model_save_dir", type=str,
+                        help="Path to save the fine-tuned model", default='')
+    parser.add_argument("--batch_size", type=int, default=4,
+                        help="Batch size for training")
+    parser.add_argument("--epochs", type=int, default=3,
+                        help="Number of epochs for training")
+
+    parser.add_argument("--model_path", type=str, help="Path to model", default='')
+    parser.add_argument("--predict_file", type=str,
+                        help="Path to save predictions", default='')
+    
+    parser.add_argument("--eval_file", type=str, help="Path to predictions file")
+    
+    return parser
+
+
+def check_raw_data(raw_data_dir: str, logger: logging.Logger):
+    files = os.listdir(raw_data_dir)
+    for file in files:
+        if file.endswith(".wav"):
+            if not any([file.replace(".wav", ".txt") in files]):
+                logger.warning(f"Missing transcript file for {file}")
+        elif file.endswith(".txt"):
+            if not any([file.replace(".txt", ".wav") in files]):
+                logger.warning(f"Missing audio file for {file}")
+        else:
+            raise ValueError(f"Unexpected file in directory: {file}")
+    nr_files = len(files) // 2
+    logger.info(
+        f"Found {nr_files} pairs of audio and transcript files in {raw_data_dir}")
+
+
+def parse_args():
+    parser = init_argparse()
+    args = parser.parse_args()
+
+    # init log file
+    logger = setup_logger(args.log_file)
+
+    if args.job == "split":
+        # Required: raw_data, split_dir
+
+        if not args.raw_data:
+            raise ValueError("You must provide --raw_data")
+        if not os.path.exists(args.raw_data):
+            raise FileExistsError(f"The raw data directory '{args.raw_data}' does not exist")
+        else:
+            check_raw_data(args.raw_data, logger)
+        if not args.split_dir:
+            raise ValueError(
+                "You must provide --split_dir to save the split files")
+        os.makedirs(args.split_dir, exist_ok=True)
+        logger.info(
+            f"Splitting data in '{args.raw_data}' and saving to '{args.split_dir}'")
+
+    elif args.job == 'preprocess':
+        # Required: raw_data, split_dir, feat_dir
+        if not args.raw_data:
+            raise ValueError("You must provide --raw_data")
+        else:
+            check_raw_data(args.raw_data, logger)
+
+        if not os.path.exists(args.split_dir):
+            raise FileExistsError("The split directory does not exist")
+        else:
+            files = os.listdir(args.split_dir)
+            if not any([f.startswith("test") for f in files]) or not any([f.startswith("train") for f in files]) or not any([f.startswith("val") for f in files]):
+                raise FileExistsError(
+                    "The split directory does not contain the necessary files")
+
+        if not args.feat_dir:
+            raise ValueError(
+                "You must provide the path --feat_dir to save the preprocessed data")
+        os.makedirs(args.feat_dir, exist_ok=True)
+        logger.info(
+            f"Preprocessing data from '{args.raw_data}' and saving to '{args.feat_dir}'")
+
+    elif args.job == 'train':
+        # required feat_dir, model_save_dir
+        if not args.feat_dir:
+            raise ValueError(
+                "You must provide --feat_dir to load the preprocessed data")
+        else:
+            # check if there is test, train, validation directories
+            if os.path.exists(os.path.join(args.feat_dir, "test")) and os.path.exists(os.path.join(args.feat_dir, "train")) and os.path.exists(os.path.join(args.feat_dir, "validation")):
+                pass
+            else:
+                raise ValueError(
+                    f"The preprocessed data directory '{args.feat_dir}' does not contain the necessary files")
+        logger.info(
+            f"Fine-tuning whisper {args.whisper_size} on {args.feat_dir} and saving to {args.model_save_dir}")
+
+    elif args.job == 'predict':
+        # required feat_dir, model_path, predict_file
+        if not args.feat_dir:
+            raise ValueError(
+                "You must provide --feat_dir to load the preprocessed data")
+        else:
+            if not os.path.exists(args.feat_dir):
+                raise FileExistsError(
+                    f"The preprocessed data directory '{args.feat_dir}' does not exist")
+        if not args.model_path:
+            logger.info(f'No model found, assuming pretrained whisper-{args.whisper_size}')
+        else:
+            if not os.path.exists(args.model_path):
+                raise FileExistsError(f"The model path '{args.model_path}' does not exist")
+
+        if not args.predict_file:
+            raise ValueError(
+                "You must provide --predict_file to save the predictions")
+        logger.info(
+            f"Predicting with model from {args.model_path} on {args.feat_dir} and saving to {args.predict_file}")
+    
+    elif args.job == 'evaluate':
+        if not args.eval_file:
+            raise ValueError(
+                "You must provide --eval_file to evaluate the predictions")
+        if not os.path.exists(args.eval_file):
+            raise ValueError(f"The predictions file '{args.eval_file}' does not exist")
+        else:
+            df = pd.read_csv(args.eval_file, nrows=1)
+            if not all([col in df.columns for col in ["audio_file", "true_text", "pred_text"]]):
+                raise ValueError(
+                    "The predictions file does not contain the necessary columns (audio_file, true_text, pred_text)")
+        logger.info(f"Evaluating predictions in {args.eval_file}")
+    return args, logger
 
 
 if __name__ == "__main__":
-    data_path = "/home/vebern/scratch/srf_ad"
-    output_path = "/home/vebern/data/ma-code/finetune_whisper/finetune_whisper_small"
-    output_feat_path = "/home/vebern/scratch/srf_ad_feat"
+    args, logger = parse_args()
 
-    model_size = 'small'
-    sizes = ['small', 'medium', 'large']
+    if args.job == 'split':
+        train_file, val_file, test_file = make_split(
+            args.raw_data, args.split_dir, train_ratio=args.split_ratio, subset=args.subset_ratio)
+        logger.info(f"Split files saved to {args.split_dir}")
 
-    # train_file, val_file, test_file = make_split(
-    #     data_path, output_path)
+    elif args.job == 'preprocess':
+        for file in os.listdir(args.split_dir):
+            if file.startswith("train"):
+                train_file = os.path.join(args.split_dir, file)
+            elif file.startswith("val"):
+                val_file = os.path.join(args.split_dir, file)
+            elif file.startswith("test"):
+                test_file = os.path.join(args.split_dir, file)
+        dataset = load_custom_dataset(
+            train_file, val_file, test_file, logger=logger)
+        preprocess(dataset, args.whisper_size, args.feat_dir, logger=logger)
 
-    # dataset = load_custom_dataset(train_file, val_file, test_file)
-    # output_feat_path = preprocess(dataset, model_size, output_feat_path)
+    elif args.job == 'train':
+        fine_tune(args.feat_dir, args.whisper_size, args.model_save_dir,
+                  batch_size=args.batch_size, epochs=args.epochs, subset=args.subset_ratio, logger=logger)
 
-    # load preprocessed datasez
+    elif args.job == 'predict':
+        dataset, size = load_data_split(args.feat_dir, args.subset_ratio)
+        # Case 1: Fine-tuned model
+        if args.model_path:
+            predict(None, dataset, args.predict_file,
+                    args.model_path, args.whisper_size, size)
+        # Case 2: Pre-trained model
+        else:
+            predict(None, dataset, args.predict_file,
+                    None, args.whisper_size, size)
 
-    # # let not fine-tuned model predict on test set
-    # test_set, nr_test_set = load_data_split(output_feat_path, "test", 0.01)
-    # predict(None, test_set, f"predictions_whisper_{model_size}_untrained.csv",
-    # model_path = None, whisper_size = model_size, data_size = nr_test_set)
-
-    fine_tune(output_feat_path, model_size,
-              save_path=f"./fine_tuned_whisper_{model_size}")
+    elif args.job == 'evaluate':
+        wer_score = evaluate(args.eval_file)
+        logger.info(f"Word Error Rate: {wer_score}")
