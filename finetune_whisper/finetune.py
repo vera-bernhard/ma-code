@@ -26,6 +26,8 @@ import wandb
 random.seed(42)
 
 # based on https://huggingface.co/learn/audio-course/chapter5/fine-tuning
+
+
 @dataclass
 class DataCollatorSpeechSeq2SeqWithPadding:
     processor: Any
@@ -127,7 +129,8 @@ def load_data_from_file(file_path: str, logger: logging.Logger = None) -> Datase
 
 
 def preprocess(dataset: DatasetDict, whisper_size: str = 'small', outdir: str = "./data_prepared/srf_ad_feat", logger: logging.Logger = None) -> str:
-    logger.info('Starting data preprocessing...')
+    logger.info('Starting data preprocessing...') if logger else print(
+        'Starting data preprocessing...')
     tokenizer = WhisperTokenizer.from_pretrained(
         f"openai/whisper-{whisper_size}")
     feature_extractor = WhisperFeatureExtractor.from_pretrained(
@@ -140,12 +143,14 @@ def preprocess(dataset: DatasetDict, whisper_size: str = 'small', outdir: str = 
         file_path = os.path.join(split_outdir, f"data_{idx}.pt")
 
         if os.path.exists(file_path):
-            logger.info(f"File {file_path} already exists. Skipping...")
+            logger.info(f"File {file_path} already exists. Skipping...") if logger else print(
+                f"File {file_path} already exists. Skipping...")
             return file_path  # Only return the file path
 
         audio_array = batch['audio']['array']
         if audio_array is None or audio_array.size == 0:
-            logger.warning(f"Faulty audio: {batch['audio']['path']}")
+            logger.warning(f"Faulty audio: {batch['audio']['path']}") if logger else print(
+                f"Faulty audio: {batch['audio']['path']}")
             return None
 
         # Process audio
@@ -171,7 +176,8 @@ def preprocess(dataset: DatasetDict, whisper_size: str = 'small', outdir: str = 
         return file_path
 
     for split_name, split_dataset in dataset.items():
-        logger.info(f"Processing split: {split_name}")
+        logger.info(f"Processing split: {split_name}") if logger else print(
+            f"Processing split: {split_name}")
 
         split_outdir = os.path.join(outdir, split_name)
         os.makedirs(split_outdir, exist_ok=True)
@@ -181,9 +187,11 @@ def preprocess(dataset: DatasetDict, whisper_size: str = 'small', outdir: str = 
                 preprocess_and_save(example, idx, split_outdir)
             except Exception as e:
                 logger.error(
+                    f"Failed to process {split_name} index {idx}: {e}") if logger else print(
                     f"Failed to process {split_name} index {idx}: {e}")
 
-    logger.info(f"Preprocessed dataset saved to {outdir}")
+    logger.info(f"Preprocessed dataset saved to {outdir}") if logger else print(
+        f"Preprocessed dataset saved to {outdir}")
     return outdir
 
 
@@ -235,8 +243,13 @@ def fine_tune(feat_dir: str, whisper_size: str = 'small', save_path: str = "./fi
 
     data_collator = DataCollatorSpeechSeq2SeqWithPadding(processor=processor)
     date = datetime.now().strftime("%Y%m%d_%H%M")
+
+    # check if save_path exists
+    if not os.path.exists(save_path):
+        os.makedirs(save_path)
+
     training_args = TrainingArguments(
-        output_dir="./finetune_whisper",
+        output_dir=save_path,
         eval_strategy="steps",
         eval_steps=500,
         per_device_train_batch_size=batch_size,
@@ -277,7 +290,8 @@ def fine_tune(feat_dir: str, whisper_size: str = 'small', save_path: str = "./fi
     model.save_pretrained(save_path)
     logger.info("Prediction on test set...") if logger else print(
         "Prediction on test set...")
-    predict(trainer, dataset["test"], "predictions.csv", whisper_size=whisper_size, logger=logger)
+    predict(trainer, dataset["test"], "predictions.csv",
+            whisper_size=whisper_size, logger=logger)
 
 
 def predict(trainer: Trainer, dataset: Union[Dataset, IterableDataset], outfile: str, model_path: str = None, whisper_size: str = 'small', data_size: int = None, logger: logging.Logger = None):
@@ -315,7 +329,8 @@ def predict(trainer: Trainer, dataset: Union[Dataset, IterableDataset], outfile:
     model.to(device)
     model.eval()
     if os.path.exists(outfile):
-        logger.warning(f"File {outfile} already exists. Deleting...")
+        logger.warning(f"File {outfile} already exists. Deleting...") if logger else print(
+            f"File {outfile} already exists. Deleting...")
         os.remove(outfile)
     with open(outfile, mode='a', newline='', encoding='utf-8') as f:
         writer = csv.writer(f)
@@ -339,11 +354,11 @@ def predict(trainer: Trainer, dataset: Union[Dataset, IterableDataset], outfile:
                 true_text = processor.batch_decode(
                     batch["labels"].clone().detach().unsqueeze(0), skip_special_tokens=True)[0]
                 audio_file = batch.get("audio_path", "Unknown")
-
                 writer.writerow([audio_file, true_text, pred_text])
                 f.flush()
 
-    logger.info(f"Predictions saved to {outfile}") if logger else print(f"Predictions saved to {outfile}")
+    logger.info(f"Predictions saved to {outfile}") if logger else print(
+        f"Predictions saved to {outfile}")
 
 
 def evaluate(pred_file: str) -> float:
@@ -352,7 +367,7 @@ def evaluate(pred_file: str) -> float:
     pred_texts = df["pred_text"].to_list()
     wer_score = wer(true_texts, pred_texts)
     return wer_score
- 
+
 
 def setup_logger(log_file: str) -> logging.Logger:
     """Set up logging configuration and return the logger."""
@@ -402,28 +417,33 @@ def init_argparse():
     parser.add_argument("--epochs", type=int, default=3,
                         help="Number of epochs for training")
 
-    parser.add_argument("--model_path", type=str, help="Path to model", default='')
+    parser.add_argument("--model_path", type=str,
+                        help="Path to model", default='')
     parser.add_argument("--predict_file", type=str,
                         help="Path to save predictions", default='')
-    
-    parser.add_argument("--eval_file", type=str, help="Path to predictions file")
-    
+
+    parser.add_argument("--eval_file", type=str,
+                        help="Path to predictions file")
+
     return parser
 
 
-def check_raw_data(raw_data_dir: str, logger: logging.Logger):
+def check_raw_data(raw_data_dir: str, logger: logging.Logger = None):
     files = os.listdir(raw_data_dir)
     for file in files:
         if file.endswith(".wav"):
             if not any([file.replace(".wav", ".txt") in files]):
-                logger.warning(f"Missing transcript file for {file}")
+                logger.warning(f"Missing transcript file for {file}") if logger else print(
+                    f"Missing transcript file for {file}")
         elif file.endswith(".txt"):
             if not any([file.replace(".txt", ".wav") in files]):
-                logger.warning(f"Missing audio file for {file}")
+                logger.warning(f"Missing audio file for {file}") if logger else print(
+                    f"Missing audio file for {file}")
         else:
             raise ValueError(f"Unexpected file in directory: {file}")
     nr_files = len(files) // 2
     logger.info(
+        f"Found {nr_files} pairs of audio and transcript files in {raw_data_dir}") if logger else print(
         f"Found {nr_files} pairs of audio and transcript files in {raw_data_dir}")
 
 
@@ -440,7 +460,8 @@ def parse_args():
         if not args.raw_data:
             raise ValueError("You must provide --raw_data")
         if not os.path.exists(args.raw_data):
-            raise FileExistsError(f"The raw data directory '{args.raw_data}' does not exist")
+            raise FileExistsError(
+                f"The raw data directory '{args.raw_data}' does not exist")
         else:
             check_raw_data(args.raw_data, logger)
         if not args.split_dir:
@@ -497,23 +518,26 @@ def parse_args():
                 raise FileExistsError(
                     f"The preprocessed data directory '{args.feat_dir}' does not exist")
         if not args.model_path:
-            logger.info(f'No model found, assuming pretrained whisper-{args.whisper_size}')
+            logger.info(
+                f'No model found, assuming pretrained whisper-{args.whisper_size}')
         else:
             if not os.path.exists(args.model_path):
-                raise FileExistsError(f"The model path '{args.model_path}' does not exist")
+                raise FileExistsError(
+                    f"The model path '{args.model_path}' does not exist")
 
         if not args.predict_file:
             raise ValueError(
                 "You must provide --predict_file to save the predictions")
         logger.info(
             f"Predicting with model from {args.model_path} on {args.feat_dir} and saving to {args.predict_file}")
-    
+
     elif args.job == 'evaluate':
         if not args.eval_file:
             raise ValueError(
                 "You must provide --eval_file to evaluate the predictions")
         if not os.path.exists(args.eval_file):
-            raise ValueError(f"The predictions file '{args.eval_file}' does not exist")
+            raise ValueError(
+                f"The predictions file '{args.eval_file}' does not exist")
         else:
             df = pd.read_csv(args.eval_file, nrows=1)
             if not all([col in df.columns for col in ["audio_file", "true_text", "pred_text"]]):
@@ -551,12 +575,12 @@ if __name__ == "__main__":
         dataset, size = load_data_split(args.feat_dir, args.subset_ratio)
         # Case 1: Fine-tuned model
         if args.model_path:
-            predict(None, dataset, args.predict_file,
-                    args.model_path, args.whisper_size, size)
+            predict(trainer=None, dataset=dataset, outfile=args.predict_file,
+                    model_path=args.model_path, whisper_size=args.whisper_size, data_size=size, logger=logger)
         # Case 2: Pre-trained model
         else:
-            predict(None, dataset, args.predict_file,
-                    None, args.whisper_size, size)
+            predict(trainer=None, dataset=dataset, outfile=args.predict_file,
+                    model_path=None, whisper_size=args.whisper_size, data_size=size, logger=logger)
 
     elif args.job == 'evaluate':
         wer_score = evaluate(args.eval_file)
