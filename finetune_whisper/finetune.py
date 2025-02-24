@@ -294,20 +294,6 @@ def fine_tune(feat_dir: str, whisper_size: str = 'small', save_path: str = "./fi
     predict(trainer, dataset["test"], "predictions.csv",
             whisper_size=whisper_size, logger=logger)
 
-def compute_metrics_wrapper(processor: WhisperProcessor):
-    def compute_metrics(pred):
-        pred_ids = pred.predictions
-        label_ids = pred.label_ids
-
-        pred_str = processor.batch_decode(pred_ids, skip_special_tokens=True)
-        label_ids[label_ids == -100] = processor.tokenizer.pad_token_id  # Ignore -100 tokens
-        label_str = processor.batch_decode(label_ids, skip_special_tokens=True)
-        wer_score = wer(label_str, pred_str)
-        cer_score = cer(label_str, pred_str)
-
-        return {"wer": wer_score, "cer": cer_score}
-    
-    return compute_metrics
 
 def compute_metrics_wrapper(processor: WhisperProcessor):
     def compute_metrics(pred):
