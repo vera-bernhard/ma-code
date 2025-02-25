@@ -312,8 +312,10 @@ def fine_tune(feat_dir: str, whisper_size: str = 'small', save_path: str = "./fi
     logger.info("Prediction on test set...") if logger else print(
         "Prediction on test set...")
     pred_file = os.path.join(save_path, "predictions.csv")
+    test_size = len(os.listdir(os.path.join(feat_dir, "test")))
+
     predict(trainer, dataset["test"], pred_file,
-            whisper_size=whisper_size, logger=logger)
+            whisper_size=whisper_size, logger=logger, data_size=test_size)
 
 
 def compute_metrics_wrapper(processor: WhisperProcessor):
