@@ -13,6 +13,7 @@ import pandas as pd
 import seaborn as sns
 from tqdm import tqdm
 from pydub import AudioSegment
+from lxml import etree
 
 ARCHIMOB_XML_DIR = 'Archimob/Archimob_Release_2'
 ARCHIMOB_WAV_DIR = 'Archimob/archimob_r2_audio_share/audio_segmented_anonymized'
@@ -34,6 +35,40 @@ logging.basicConfig(
     filemode='a'
 )
 logging.basicConfig(filename='datareader.log', level=logging.INFO)
+
+# MUNDARTKORPUS FUNCTIONS
+def extract_text_chmk(xml_file: str) -> list[str]:
+    """Extracts sentences from a structured TEI XML file."""
+    punctuation = ['.', '!', '?', ',', ';', ':']
+    tree = etree.parse(xml_file)
+    root = tree.getroot()
+
+    # Define the namespace (TEI uses a default namespace)
+    ns = {'tei': 'http://www.tei-c.org/ns/1.0'}
+
+    sentences = []
+
+    # Find all sentence elements <s> inside paragraphs <p>
+    for s in root.xpath('.//tei:text/tei:body//tei:p/tei:s', namespaces=ns):
+        sentence = ''
+        words = [word.text for word in s.xpath('.//tei:w', namespaces=ns) if word.text]
+        for w in words: 
+            if len(w) == 1 and w in punctuation:
+                sentence = sentence.strip()
+            sentence += w + ' '           
+        sentences.append(sentence.strip())  
+    return sentences
+
+
+def process_chmk(xml_dir: str, outdir: str) -> None:
+    os.makedirs(outdir, exist_ok=True)
+    for file in os.listdir(xml_dir):
+        if file.endswith('.xml'):
+            xml_file = os.path.join(xml_dir, file)
+            sentences = extract_text_chmk(xml_file)
+            with open(os.path.join(outdir, file.replace('.xml', '.txt')), 'w', encoding='utf-8') as f:
+                for sent in sentences:
+                    f.write(sent + '\n')
 
 
 # ARCHIMOB FUNCTIONS
@@ -592,7 +627,12 @@ def hist_plot(df: pd.DataFrame, col: str, title: str, xlabel: str, save_path: st
 
 
 def main():
-    pass
+    xml_file = "data_raw/Mundartkorpus/XML-CHMK_v2.1_corpus/100008_Rhyner-Freitag_Buech.xml"
+    sents = extract_text_chmk(xml_file)
+    print(sents)
+    xml_dir = 'data_raw/Mundartkorpus/XML-CHMK_v2.1_corpus'
+    outdir = 'data_prepared/mundartkorpus'
+    process_chmk(xml_dir, outdir)
     # output_dir = 'data_samples'
     # # audio_file, tokens_file = get_archimob_data('1082_1', 21, 40, output_dir)
 
