@@ -535,13 +535,15 @@ def get_audio_duration(file_path: str) -> float:
     return duration_in_minutes
 
 
-def calculate_total_audio_stats(folder_path) -> tuple[float, float, list[float]]:
+def calculate_total_audio_stats(folder_path: str, filter_list: Optional[list[str]]=None) -> tuple[float, float, list[float]]:
     """Calculate the total duration of all audio files in a folder."""
     total_duration = 0.0
     nr_files = 0
     durations = []
     for root, _, files in os.walk(folder_path):
         for filename in files:
+            if filter_list and filename not in filter_list:
+                continue
             if filename.endswith('.wav'):
                 nr_files += 1
                 file_path = os.path.join(root, filename)
