@@ -309,6 +309,7 @@ def fine_tune(feat_dir: str, whisper_size: str = 'small', save_path: str = "./fi
     logger.info(f"Saving model to {save_path}") if logger else print(
         f"Saving model to {save_path}")
     model.save_pretrained(save_path)
+    processor.save_pretrained(save_path)
     logger.info("Prediction on test set...") if logger else print(
         "Prediction on test set...")
     pred_file = os.path.join(save_path, "predictions.csv")
@@ -352,7 +353,13 @@ def predict(trainer: Trainer, dataset: Union[Dataset, IterableDataset], outfile:
         logger.info(f"Loading fine-tuned model from {model_path}") if logger else print(
             f"Loading fine-tuned model from {model_path}")
         model = WhisperForConditionalGeneration.from_pretrained(model_path)
-        processor = WhisperProcessor.from_pretrained(model_path)
+        try:
+            processor = WhisperProcessor.from_pretrained(model_path)
+        except OSError:
+            # Load processor from configs, if accidentally not saved, little hacky but should work
+            model_size = model.config._name_or_path
+            processor = WhisperProcessor.from_pretrained(
+                f"openai/whisper-{model_size}")
 
     # Case 2: Trainer object
     elif trainer:
