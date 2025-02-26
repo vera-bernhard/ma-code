@@ -51,7 +51,8 @@ class BertFineTuneDataset:
         all_texts = []
 
         for file in os.listdir(self.data_dir):  # Process each file separately
-            sentences = self._load_sentences(file)
+            file_path = os.path.join(self.data_dir, file)
+            sentences = self._load_sentences(file_path)
             concatenated_texts = self._concatenate_and_tokenize(sentences)
             all_texts.extend(concatenated_texts)  # Keep separate per file
 
@@ -73,6 +74,7 @@ class BertFineTuneDataset:
 
 
 def finetune(data_dir: str, save_dir: str):
+    os.makedirs(save_dir, exist_ok=True)
     model_name = "google-bert/bert-base-german-cased"
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -100,9 +102,7 @@ def finetune(data_dir: str, save_dir: str):
         per_device_eval_batch_size=8,
         num_train_epochs=3,
         weight_decay=0.01,
-        logging_dir="./logs",
         logging_steps=250,
-        save_total_limit=2,
         push_to_hub=False,
         report_to="wandb",
         metric_for_best_model="eval_loss",
@@ -153,3 +153,12 @@ def compute_bertscore(hypothesis: str, reference, model: str, tokenizer: BertTok
              ).sum() / valid_tokens.sum()
 
     return score.item()
+
+
+def main():
+    data_dir = '/scratch/vebern/mundartkorpus'
+    save_dir = '/data/vebern/ma-code/model/bert_finetuned_20250226'
+    finetune(data_dir=data_dir, save_dir=save_dir)
+
+if __name__ == "__main__":
+    main()
