@@ -352,14 +352,8 @@ def predict(trainer: Trainer, dataset: Union[Dataset, IterableDataset], outfile:
     if model_path:
         logger.info(f"Loading fine-tuned model from {model_path}") if logger else print(
             f"Loading fine-tuned model from {model_path}")
-        model = WhisperForConditionalGeneration.from_pretrained(model_path)
-        try:
-            processor = WhisperProcessor.from_pretrained(model_path)
-        except OSError:
-            # Load processor from configs, if accidentally not saved, little hacky but should work
-            model_size = model.config._name_or_path
-            processor = WhisperProcessor.from_pretrained(
-                f"openai/whisper-{model_size}")
+        model = WhisperForConditionalGeneration.from_pretrained(model_path, use_safetensors=True)
+        processor = WhisperProcessor.from_pretrained(model_path)
 
     # Case 2: Trainer object
     elif trainer:
