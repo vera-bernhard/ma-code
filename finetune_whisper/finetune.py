@@ -23,8 +23,9 @@ import pandas as pd
 import torch
 import wandb
 
-# Set seed for reproducibility
+# TODO: set proper seed
 random.seed(42)
+torch.manual_seed(42)
 
 # based on https://huggingface.co/learn/audio-course/chapter5/fine-tuning
 
