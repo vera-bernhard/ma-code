@@ -6,7 +6,6 @@ data_raw/*/*
 *env2
 whisper/*
 wandb/*
-
 model/*
 archive/*
 

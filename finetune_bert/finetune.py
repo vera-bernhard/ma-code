@@ -56,21 +56,23 @@ class BertFineTuneDataset:
             sentences = self._load_sentences(file_path)
             concatenated_texts = self._concatenate_and_tokenize(sentences)
             all_texts.extend(concatenated_texts)  # Keep separate per file
-
+        
+        print('Splitting the data...', flush=True)
         # Split into train & validation
         train_texts, val_texts = train_test_split(
             all_texts, test_size=self.test_size, random_state=42)
+        print('Spllitting done...', flush=True)
 
         # Create Hugging Face dataset
         dataset = DatasetDict({
             "train": Dataset.from_dict({"text": train_texts}),
             "validation": Dataset.from_dict({"text": val_texts})
         })
-
+        print('Start tokenizing...', flush=True)
         # Tokenize dataset
         dataset = dataset.map(lambda x: self.tokenizer(
             x["text"], truncation=True, max_length=self.max_length, padding="max_length"), batched=True)
-
+        print('Finished tokenizing...', flush=True)
         return dataset
 
 
@@ -79,6 +81,7 @@ def finetune(data_dir: str, save_dir: str):
     model_name = "google-bert/bert-base-german-cased"
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+    print('Loading model...', flush=True)
     model = BertForMaskedLM.from_pretrained(model_name).to(device)
     tokenizer = BertTokenizer.from_pretrained(model_name)
 
@@ -87,8 +90,10 @@ def finetune(data_dir: str, save_dir: str):
         mlm=True,
         mlm_probability=0.15
     )
+    print('Start preparing dataset...', flush=True)
     dataset_builder = BertFineTuneDataset(data_dir)
     dataset = dataset_builder.prepare_dataset()
+    print('Finished preparing dataset...', flush=True)
     set_seed(42)
     date = datetime.now().strftime("%Y%m%d_%H%M")
 
@@ -165,7 +170,7 @@ def compute_bertscore(hypothesis: str, reference, model: str, tokenizer: BertTok
 
 
 def main():
-    data_dir = '/scratch/vebern/mundartkorpus'
+    data_dir = '/home/vebern/data/ma-code/data'
     save_dir = '/data/vebern/ma-code/model/bert_finetuned_20250226'
     finetune(data_dir=data_dir, save_dir=save_dir)
 
