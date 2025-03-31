@@ -15,6 +15,7 @@ import torch
 # TODO set proper seed
 torch.manual_seed(42)
 
+
 class BertFineTuneDataset:
     def __init__(self, data_dir, tokenizer_name="bert-base-german-cased", test_size=0.1, max_length=512):
         self.data_dir = data_dir
@@ -90,7 +91,7 @@ def finetune(data_dir: str, save_dir: str):
     dataset = dataset_builder.prepare_dataset()
     set_seed(42)
     date = datetime.now().strftime("%Y%m%d_%H%M")
-    
+
     training_args = TrainingArguments(
         output_dir=save_dir,
         eval_strategy="steps",
@@ -107,7 +108,7 @@ def finetune(data_dir: str, save_dir: str):
         report_to="wandb",
         metric_for_best_model="eval_loss",
         load_best_model_at_end=True,
-        run_name=f"finetune-swissbert_{date}",         
+        run_name=f"finetune-swissbert_{date}",
         fp16=True,
         gradient_accumulation_steps=2,
         dataloader_num_workers=4,
@@ -127,7 +128,7 @@ def finetune(data_dir: str, save_dir: str):
     tokenizer.save_pretrained(save_dir)
 
 
-def get_token_embeddings(text, model, tokenizer):
+def get_sentence_embeddings(text, model, tokenizer, pooling="mean"):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = model.to(device)
     inputs = tokenizer(text, return_tensors="pt",
@@ -136,21 +137,29 @@ def get_token_embeddings(text, model, tokenizer):
     with torch.no_grad():
         outputs = model(**inputs)
 
-    return outputs.last_hidden_state, inputs["attention_mask"]
+    token_embeddings = outputs.last_hidden_state
+    attention_mask = inputs["attention_mask"]
+
+    # Option 1: Take CLS token
+    if pooling == "cls":
+        return token_embeddings[:, 0, :].squeeze(0)
+
+    # Option 2: Take mean of all tokens
+    elif pooling == "mean":
+        mask_expanded = attention_mask.unsqueeze(
+            -1).expand(token_embeddings.size())
+        sum_embeddings = torch.sum(token_embeddings * mask_expanded, dim=1)
+        sum_mask = torch.clamp(mask_expanded.sum(
+            dim=1), min=1e-9)  # Avoid division by zero
+        return (sum_embeddings / sum_mask).squeeze(0)
 
 
 def compute_bertscore(hypothesis: str, reference, model: str, tokenizer: BertTokenizer):
-    hyp_embeddings, cand_mask = get_token_embeddings(
-        hypothesis, model, tokenizer)
-    ref_embeddings, ref_mask = get_token_embeddings(
-        reference, model, tokenizer)
-    cos = torch.nn.CosineSimilarity()
-    similarities = cos(hyp_embeddings, ref_embeddings)
+    hyp_embedding = get_sentence_embeddings(hypothesis, model, tokenizer)
+    ref_embedding = get_sentence_embeddings(reference, model, tokenizer)
 
-    valid_tokens = torch.min(cand_mask, ref_mask).float()
-    # Aggregate: Mean similarity over valid (non-padding) tokens
-    score = (similarities * valid_tokens.unsqueeze(-1)
-             ).sum() / valid_tokens.sum()
+    cos = torch.nn.CosineSimilarity(dim=0)
+    score = cos(hyp_embedding, ref_embedding)
 
     return score.item()
 
@@ -159,6 +168,7 @@ def main():
     data_dir = '/scratch/vebern/mundartkorpus'
     save_dir = '/data/vebern/ma-code/model/bert_finetuned_20250226'
     finetune(data_dir=data_dir, save_dir=save_dir)
+
 
 if __name__ == "__main__":
     main()
